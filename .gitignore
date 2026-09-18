@@ -1,0 +1,17 @@
+# financial data never goes in git
+specs/*.xlsx
+imports
+output
+logs
+data/processing_log.csv
+data/new_suppliers_pending.csv
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# local
+.env
+*.tmp

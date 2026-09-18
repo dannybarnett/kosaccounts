@@ -1,0 +1,37 @@
+# Kosibah accounts pipeline configuration. Paths are relative to this file's directory.
+
+[paths]
+imports = "imports"
+output_workbook = "output/kosibah_import.xlsx"
+data = "data"
+logs = "logs"
+master_workbook = "specs/Kosibah LLC purchases and receipts.xlsx"
+
+[processing]
+# false: flagged rows get Status=Review and the run continues (headless default).
+# true: a run with any flagged item stops before writing the workbook.
+block_on_flags = false
+stages = ["receipt", "bank"]
+
+[receipts]
+min_confidence = 0.75      # below this the row is marked Review
+max_image_px = 2000        # longest side after conversion for the model's Read tool
+default_currency = "USD"
+amount_tolerance = "0.01"  # net + tax must equal total within this
+
+[suppliers]
+auto_match_threshold = 92   # rapidfuzz token_set_ratio >= this: accept without the model
+model_review_threshold = 70 # between this and auto: ask the model to adjudicate; below: new supplier
+
+[bank]
+match_window_days = 5
+# bank descriptions (case-insensitive substrings) that are never purchases
+ignore_descriptions = ["PAYMENT - THANK YOU", "AUTOPAY PAYMENT", "TRANSFER TO", "INTEREST CHARGE"]
+
+[claude]
+command = "claude"
+model = "sonnet"           # cheapest model that reads receipts reliably; "" = CLI default
+timeout_seconds = 120
+max_turns = 4
+retries = 1
+allowed_tools = ["Read"]
