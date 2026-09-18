@@ -18,6 +18,9 @@ min_confidence = 0.75      # below this the row is marked Review
 max_image_px = 2000        # longest side after conversion for the model's Read tool
 default_currency = "USD"
 amount_tolerance = "0.01"  # net + tax must equal total within this
+# Text removed from the filename before it is used as a supplier hint (Dropbox File Requests
+# append the uploader's name: "2026-06-12 Guide Fabrics INC Yemi Osunkoya.pdf"). Case-insensitive.
+filename_strip = ["Yemi Osunkoya", "Danny Barnett", "D Barnett"]
 
 [suppliers]
 auto_match_threshold = 92   # rapidfuzz token_set_ratio >= this: accept without the model
@@ -25,8 +28,12 @@ model_review_threshold = 70 # between this and auto: ask the model to adjudicate
 
 [bank]
 match_window_days = 5
-# bank descriptions (case-insensitive substrings) that are never purchases
-ignore_descriptions = ["PAYMENT - THANK YOU", "AUTOPAY PAYMENT", "TRANSFER TO", "INTEREST CHARGE"]
+# bank descriptions (case-insensitive substrings) that are never purchases: card payments,
+# transfers between Danny's own accounts, interest.
+ignore_descriptions = [
+  "PAYMENT - THANK YOU", "AUTOPAY PAYMENT", "TRANSFER TO", "TRANSFER WITHDRAWAL",
+  "TRANSFER DEPOSIT", "INTEREST CHARGE", "INTEREST PAID",
+]
 
 [claude]
 command = "claude"

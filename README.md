@@ -50,6 +50,26 @@ cd /home/dannybarnett/claude-coding/kosaccounts
 .venv/bin/python -m pytest                           # test suite
 ```
 
+## Running by hand and watching progress
+
+```bash
+cd /home/dannybarnett/claude-coding/kosaccounts
+scripts/rclone_import.sh        # same as the :00 cron job
+scripts/run_pipeline.sh         # same as the :15 cron job; output goes to the log, not the screen
+```
+
+Follow a run live from a second terminal:
+
+```bash
+tail -f logs/pipeline-$(date +%F).log
+```
+
+Expect roughly 10 seconds per receipt (each one is a model call); bank CSVs take under a second.
+The workbook, ledger and run summary are written only at the end of the run. The scripts take a
+lock, so a manual run started while cron's run is active exits at once with an "already running"
+line in `logs/pipeline.lock.log`. Running `.venv/bin/python -m kosaccounts run` directly prints
+to the screen instead, but takes no lock, so avoid starting it right around :15.
+
 ## Reviewing a run
 
 1. `tail logs/run-$(date +%F).log` shows files found/new, rows added, review rows, new suppliers.
@@ -59,12 +79,33 @@ cd /home/dannybarnett/claude-coding/kosaccounts
 4. To reprocess a file, delete its line from `data/processing_log.csv` (and its row from the
    workbook) and it will be picked up next run.
 
+## Receipt filenames
+
+`YYYY-MM-DD Supplier.pdf` gives the reader a date and supplier hint (tie-breakers only; the
+receipt itself wins). Dropbox File Requests append the uploader's name, e.g.
+`2026-06-12 Guide Fabrics Yemi Osunkoya.pdf`; names listed under `receipts.filename_strip` in
+`config.toml` are removed from the hint. Add a new uploader's name there.
+
 ## Bank statements
 
 Save the bank's own export, not the web page: CSV ("download transactions") is best, a PDF
 statement is fine, an HTML "save page as" is usually an empty application shell. A format no
 parser recognises is sent to the model and the file is flagged; add a parser under
 `kosaccounts/bank/` and register it in `bank/registry.py`.
+
+## Python environment
+
+`.venv/` is a private Python environment inside the project (built with uv, no sudo needed).
+`.venv/bin/python` is the interpreter with this project's packages; cron and the scripts use that
+path, so nothing depends on activating it. `requirements.txt` is the source of truth for packages.
+
+```bash
+~/.local/bin/uv pip install --python .venv/bin/python -r requirements.txt            # sync after a pull
+~/.local/bin/uv pip install --python .venv/bin/python -r requirements.txt --upgrade  # upgrade, then run pytest
+rm -rf .venv && scripts/install.sh                                                   # rebuild from scratch
+```
+
+Never `sudo pip` or `apt` Python packages for this project; the venv would not see them.
 
 ## Setup on a fresh machine
 

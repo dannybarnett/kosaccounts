@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional, Sequence
 
 from kosaccounts.bank.registry import parse_statement
@@ -32,7 +33,7 @@ from kosaccounts.ledger import Ledger
 from kosaccounts.models import LedgerEntry, PurchaseRow, ReconcileResult, RunSummary, Stage
 from kosaccounts.receipts.extract import cfg_payment_methods, extract_receipt, to_purchase_row
 from kosaccounts.reconcile import reconcile
-from kosaccounts.suppliers import SupplierBook
+from kosaccounts.suppliers import SupplierBook, normalise
 from kosaccounts.summary import write_summary
 from kosaccounts.workbook import OutputWorkbook
 
@@ -125,6 +126,36 @@ def run_pipeline(cfg: Config, dry_run: bool = False, stages: Optional[Sequence[S
             )
         )
         logger.info("receipt: %s -> %s %s %s", file.relative_path, row.company, row.total, row.status)
+
+    # --- Step 3b: flag duplicate receipts. Dropbox lets the same receipt get uploaded twice under
+    # two filenames; catch it by (date, normalised company, total) matching either an earlier row in
+    # this same batch or a row already saved in the workbook. ---
+    if receipt_rows:
+        legal_suffixes = cfg.suppliers.legal_suffixes
+        ledger_by_relpath = {
+            entry.relative_path: entry for entry in pending_ledger_entries if entry.stage == "receipt"
+        }
+
+        def _dup_key(row: PurchaseRow) -> tuple:
+            return (row.date, normalise(row.company, legal_suffixes), row.total.quantize(Decimal("0.01")))
+
+        seen_keys: dict[tuple, str] = {}
+        for existing_row in workbook.rows():
+            seen_keys.setdefault(_dup_key(existing_row), existing_row.source_file)
+
+        for row in receipt_rows:
+            key = _dup_key(row)
+            other_source = seen_keys.get(key)
+            if other_source is not None:
+                note = f"Possible duplicate of {other_source}"
+                row.notes = f"{row.notes}; {note}" if row.notes else note
+                row.status = "Review"
+                logger.info("receipt: %s -> possible duplicate of %s", row.source_file, other_source)
+                entry = ledger_by_relpath.get(row.source_file)
+                if entry is not None and entry.status != "Flagged":
+                    entry.status = "Flagged"
+                    summary.files_flagged["receipt"] += 1
+            seen_keys[key] = row.source_file
 
     # --- Step 4: bank stage ---
     all_txns = []

@@ -40,6 +40,37 @@ _SEP_RE = re.compile(r"^[\s\-_]+")
 # parenthesised group such as the uploader's name that Dropbox File Requests may append.
 _TRAILING_NOISE_RE = re.compile(r"\s*(\([^()]*\)|receipt)\s*$", re.IGNORECASE)
 
+# C0 control characters that can end up in pdfplumber output (e.g. \x00 from malformed PDFs) and
+# break subprocess argv; \n and \t are left alone since they're harmless and legible in a prompt.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def sanitize_pdf_text(text: Optional[str]) -> Optional[str]:
+    """Strip NUL and other C0 control characters (except \\n, \\t) from extracted PDF text."""
+    if text is None:
+        return None
+    return _CONTROL_CHARS_RE.sub("", text)
+
+
+def apply_filename_strip(supplier_hint: Optional[str], strip_list: list[str]) -> Optional[str]:
+    """Remove each `strip_list` entry from `supplier_hint` (case-insensitive whole-word match,
+    tolerant of surrounding spaces/dashes/underscores), then strip leftover separators.
+    'Guide Fabrics INC Yemi Osunkoya' with strip_list=['Yemi Osunkoya'] -> 'Guide Fabrics INC'.
+    'Yemi Osunkoya' -> None (nothing left)."""
+    if not supplier_hint:
+        return None
+
+    result = supplier_hint
+    for term in strip_list:
+        term = (term or "").strip()
+        if not term:
+            continue
+        pattern = re.compile(r"[\s\-_]*\b" + re.escape(term) + r"\b[\s\-_]*", re.IGNORECASE)
+        result = pattern.sub(" ", result)
+
+    result = re.sub(r"\s+", " ", result).strip(" \t-_")
+    return result or None
+
 
 def parse_filename_hint(filename: str) -> tuple[Optional[date], Optional[str]]:
     """'2026-09-01 - Mood.pdf' -> (date(2026,9,1), 'Mood'); '2026-09-01 Mood Fabrics.jpg' works too;
@@ -169,13 +200,14 @@ def _to_notes(value) -> list[str]:
 
 
 def extract_receipt(file: DiscoveredFile, client: ClaudeClient, cfg: Config, payment_methods: list[str]) -> ReceiptExtract:
-    date_hint, supplier_hint = parse_filename_hint(file.filename)
+    date_hint, raw_supplier_hint = parse_filename_hint(file.filename)
+    supplier_hint = apply_filename_strip(raw_supplier_hint, cfg.receipts.filename_strip)
     hints = {"date": date_hint, "supplier": supplier_hint}
 
     suffix = file.path.suffix.lower()
 
     if suffix in PDF_SUFFIXES:
-        pdf_text = _pdf_text(file.path)
+        pdf_text = sanitize_pdf_text(_pdf_text(file.path))
         model_path = file.path
     elif suffix in IMAGE_SUFFIXES:
         pdf_text = None
@@ -230,31 +262,57 @@ def extract_receipt(file: DiscoveredFile, client: ClaudeClient, cfg: Config, pay
     return validate(extract, cfg)
 
 
+_RECONCILE_PROBLEM = "amounts do not reconcile: net+tax != total"
+_NO_TAX_NOTE = "no tax shown; net = total"
+
+
 def validate(extract: ReceiptExtract, cfg: Config) -> ReceiptExtract:
-    """Mutates and returns `extract`; never raises for data problems (adds notes)."""
+    """Mutates and returns `extract`; never raises for data problems.
+
+    Model observations (whatever the model put in extract.notes) are left alone and never treated
+    as problems. Validation adds its own messages to .notes for the human reviewer, and additionally
+    records genuine problems (amounts don't reconcile, non-USD currency, missing date/supplier/total)
+    in extract.raw["_problems"] -- that list, not .notes, is what to_purchase_row() uses to decide
+    Status=Review. "No tax shown" is a note, never a problem: most purchases here are resale (no
+    sales tax), so a receipt with a total but no tax line is normal, not a defect.
+    """
     try:
         tolerance = Decimal(str(cfg.receipts.amount_tolerance))
     except InvalidOperation:
         tolerance = Decimal("0.01")
 
-    present = {
-        "net": extract.net,
-        "sales_tax": extract.sales_tax,
-        "total": extract.total,
-    }
-    missing = [k for k, v in present.items() if v is None]
+    problems: list[str] = []
 
-    if len(missing) == 1:
-        if missing[0] == "total":
-            extract.total = extract.net + extract.sales_tax
-        elif missing[0] == "net":
-            extract.net = extract.total - extract.sales_tax
-        elif missing[0] == "sales_tax":
-            extract.sales_tax = extract.total - extract.net
+    total, net, tax = extract.total, extract.net, extract.sales_tax
+
+    if total is not None and net is None and tax is None:
+        # No tax line at all: assume resale (no sales tax) rather than flagging for review.
+        extract.sales_tax = Decimal("0")
+        extract.net = total
+        extract.tax_rate = Decimal("0")
+        extract.notes.append(_NO_TAX_NOTE)
+    elif total is not None and net is not None and tax is None:
+        derived_tax = total - net
+        if derived_tax >= 0:
+            extract.sales_tax = derived_tax
+        else:
+            extract.notes.append(_RECONCILE_PROBLEM)
+            problems.append(_RECONCILE_PROBLEM)
+    elif total is not None and net is None and tax is not None:
+        extract.net = total - tax
+    elif total is None and net is not None and tax is not None:
+        extract.total = net + tax
+    elif total is None and net is not None and tax is None:
+        extract.total = net
+        extract.sales_tax = Decimal("0")
+        extract.notes.append(_NO_TAX_NOTE)
+    # else: total is None and net is None (tax present or not) -- nothing to derive; the
+    # "total missing" problem below covers it.
 
     if extract.net is not None and extract.sales_tax is not None and extract.total is not None:
         if abs((extract.net + extract.sales_tax) - extract.total) > tolerance:
-            extract.notes.append("amounts do not reconcile: net+tax != total")
+            extract.notes.append(_RECONCILE_PROBLEM)
+            problems.append(_RECONCILE_PROBLEM)
 
     if extract.tax_rate is None and extract.net is not None and extract.net > 0 and extract.sales_tax is not None:
         if extract.sales_tax == 0:
@@ -264,7 +322,9 @@ def validate(extract: ReceiptExtract, cfg: Config) -> ReceiptExtract:
             extract.tax_rate = rate
 
     if extract.currency and extract.currency != cfg.receipts.default_currency:
-        extract.notes.append(f"currency {extract.currency}: convert to USD and note the rate")
+        msg = f"currency {extract.currency}: convert to USD and note the rate"
+        extract.notes.append(msg)
+        problems.append(msg)
 
     hints = extract.raw.get("_hints", {}) if isinstance(extract.raw, dict) else {}
     hint_date = hints.get("date")
@@ -276,9 +336,20 @@ def validate(extract: ReceiptExtract, cfg: Config) -> ReceiptExtract:
         extract.supplier_name = hint_supplier
 
     if extract.date is None:
-        extract.notes.append("date missing")
+        msg = "date missing"
+        extract.notes.append(msg)
+        problems.append(msg)
     if not extract.supplier_name:
-        extract.notes.append("supplier missing")
+        msg = "supplier missing"
+        extract.notes.append(msg)
+        problems.append(msg)
+    if extract.total is None and extract.net is None:
+        msg = "total missing"
+        extract.notes.append(msg)
+        problems.append(msg)
+
+    if problems:
+        extract.raw["_problems"] = problems
 
     return extract
 
@@ -338,10 +409,15 @@ def to_purchase_row(
     cfg: Config,
     processed_on: datetime,
 ) -> PurchaseRow:
-    """Status is "Review" if: match.is_new, category invalid, confidence < min_confidence, any money
-    field missing, or extract.notes non-empty. company = match.canonical or extract.supplier_name.
-    payment_method = normalised hint mapped onto data/payment_methods.csv names when obvious
-    (e.g. 'VISA ****1234' -> 'Visa', 'MasterCard' -> 'Mastercard'), else the hint verbatim, else ''."""
+    """Status is "Review" if, and only if: match.is_new, category invalid/empty,
+    extract.confidence < cfg.receipts.min_confidence (this also covers extraction failure, which
+    reports confidence 0), extract.total is None (amount missing), or extract.raw["_problems"] is
+    non-empty (validate()'s own findings: unreconciled amounts, non-USD currency, missing
+    date/supplier/total). Model observations in extract.notes are never, by themselves, a reason to
+    flag a row -- they still appear in the Notes column text for the human reviewer.
+    company = match.canonical or extract.supplier_name. payment_method = normalised hint mapped onto
+    data/payment_methods.csv names when obvious (e.g. 'VISA ****1234' -> 'Visa', 'MasterCard' ->
+    'Mastercard'), else the hint verbatim, else ''."""
     notes = list(extract.notes)
 
     company = match.canonical or extract.supplier_name or ""
@@ -351,16 +427,13 @@ def to_purchase_row(
         category = categories.canonical(match.default_category) or match.default_category
     schedule_c = categories.schedule_c_for(category) or "" if category else ""
 
-    money_missing = False
-
     def money(value: Optional[Decimal]) -> Decimal:
-        nonlocal money_missing
         if value is None:
-            money_missing = True
             notes.append("amount missing; defaulted to 0")
             return Decimal("0")
         return value
 
+    total_missing = extract.total is None
     net = money(extract.net)
     sales_tax = money(extract.sales_tax)
     total = money(extract.total)
@@ -373,13 +446,16 @@ def to_purchase_row(
         row_date = processed_on.date()
         notes.append("date defaulted to processing date")
 
+    problems = extract.raw.get("_problems") if isinstance(extract.raw, dict) else None
+
     status = "OK"
     if (
         match.is_new
         or not category
         or extract.confidence < cfg.receipts.min_confidence
-        or money_missing
-        or extract.notes
+        or extract.confidence <= 0
+        or total_missing
+        or bool(problems)
     ):
         status = "Review"
 

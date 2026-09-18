@@ -56,6 +56,7 @@ class ReceiptsConfig:
     max_image_px: int = 2000
     default_currency: str = "USD"
     amount_tolerance: str = "0.01"
+    filename_strip: list[str] = field(default_factory=list)  # uploader names etc. removed from hints
 
 
 @dataclass

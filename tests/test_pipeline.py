@@ -360,6 +360,85 @@ class TestBankStage:
 # ---------------------------------------------------------------------------
 
 
+class TestDuplicateReceipts:
+    """P6: Dropbox File Requests can end up with the same receipt uploaded twice under two
+    filenames; the pipeline should flag the second occurrence rather than silently doubling the
+    purchase."""
+
+    def test_duplicate_within_same_batch_flags_second_occurrence(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first_path = cfg.paths.imports / "receipts" / "2026-09-01 - Pacific Trimming.png"
+        second_path = cfg.paths.imports / "receipts" / "2026-09-01 - Pacific Trimming (1).png"
+        make_png(first_path)
+        make_png(second_path)
+
+        receipts = {
+            first_path.stem: canned_receipt(),
+            second_path.stem: canned_receipt(),
+        }
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(receipts=receipts))
+
+        summary = run_pipeline(cfg)
+
+        wb = OutputWorkbook(cfg.paths.output_workbook)
+        rows = wb.rows()
+        assert len(rows) == 2
+
+        review_rows = [r for r in rows if r.status == "Review"]
+        ok_rows = [r for r in rows if r.status == "OK"]
+        assert len(review_rows) == 1
+        assert len(ok_rows) == 1
+        assert f"Possible duplicate of {ok_rows[0].source_file}" in review_rows[0].notes
+
+        assert summary.rows_review == 1
+
+        ledger = Ledger(cfg.paths.ledger)
+        entries = {e.relative_path: e for e in ledger.entries()}
+        assert entries[ok_rows[0].source_file].status == "Processed"
+        assert entries[review_rows[0].source_file].status == "Flagged"
+
+    def test_duplicate_against_existing_workbook_row_is_flagged(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        existing_row = PurchaseRow(
+            date=date(2026, 9, 1),
+            company="Pacific Trimming",
+            category="Haberdashery",
+            schedule_c="Cost of Goods Sold",
+            net=Decimal("19.50"),
+            sales_tax=Decimal("0.00"),
+            total=Decimal("19.50"),
+            tax_rate=Decimal("0"),
+            payment_method="",
+            notes="",
+            year=2026,
+            source_file="receipts/2026-08-01 - Pacific Trimming Old.pdf",
+            processed_on=datetime(2026, 8, 1, 9, 0, 0),
+            status="OK",
+        )
+        wb = OutputWorkbook(cfg.paths.output_workbook)
+        wb.append([existing_row])
+        wb.save()
+
+        new_path = cfg.paths.imports / "receipts" / "2026-09-01 - Pacific Trimming.png"
+        make_png(new_path)
+        receipts = {new_path.stem: canned_receipt()}  # date 2026-09-01, total 19.5, Pacific Trimming
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(receipts=receipts))
+
+        run_pipeline(cfg)
+
+        wb2 = OutputWorkbook(cfg.paths.output_workbook)
+        rows = wb2.rows()
+        new_row = next(r for r in rows if r.source_file == "receipts/2026-09-01 - Pacific Trimming.png")
+        assert new_row.status == "Review"
+        assert "Possible duplicate of receipts/2026-08-01 - Pacific Trimming Old.pdf" in new_row.notes
+
+        ledger = Ledger(cfg.paths.ledger)
+        entries = {e.relative_path: e for e in ledger.entries()}
+        assert entries["receipts/2026-09-01 - Pacific Trimming.png"].status == "Flagged"
+
+
 class TestBlockOnFlags:
     def test_block_on_flags_prevents_write(
         self, blocking_cfg: Config, monkeypatch: pytest.MonkeyPatch

@@ -75,6 +75,8 @@ def normalise(name: str, legal_suffixes: Optional[list[str]] = None) -> str:
 PROCESSOR_PREFIXES = {
     "sq", "tst", "pp", "paypal", "pos", "dbt", "crd", "chkcard", "checkcard", "purchase",
     "debit", "card", "ach", "pmt", "pymt", "recurring", "ext", "int",
+    "recur", "online", "web", "intl", "chk", "ck", "eft", "pre", "auth", "authorized",
+    "visa", "mc", "mastercard", "discover", "amex",
 }
 
 

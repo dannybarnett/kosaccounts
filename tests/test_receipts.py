@@ -18,8 +18,10 @@ from kosaccounts.config import Config
 from kosaccounts.models import DiscoveredFile, ReceiptExtract, SupplierMatch
 from kosaccounts.receipts import extract as extract_mod
 from kosaccounts.receipts.extract import (
+    apply_filename_strip,
     extract_receipt,
     parse_filename_hint,
+    sanitize_pdf_text,
     to_purchase_row,
     validate,
 )
@@ -327,6 +329,126 @@ class TestPdfBranch:
 
 
 # ---------------------------------------------------------------------------
+# P3: sanitise NUL / control chars out of pdfplumber text before it reaches the prompt
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizePdfText:
+    def test_removes_null_and_control_chars(self) -> None:
+        assert sanitize_pdf_text("Hello\x00World\x01\x1f\n\tOK") == "HelloWorld\n\tOK"
+
+    def test_none_passthrough(self) -> None:
+        assert sanitize_pdf_text(None) is None
+
+    def test_empty_string(self) -> None:
+        assert sanitize_pdf_text("") == ""
+
+    def test_extract_receipt_strips_null_bytes_from_prompt(
+        self, tmp_repo: Path, cfg: Config, monkeypatch
+    ) -> None:
+        """Regression for a real failure: pdfplumber text containing \\x00 made ClaudeClient's
+        subprocess call raise ValueError("embedded null byte"). The prompt handed to the model must
+        never contain a NUL, whatever pdfplumber returned."""
+        receipts_dir = tmp_repo / "imports" / "receipts"
+        receipts_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = receipts_dir / "2026-09-01 - Mood.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4 fake")
+
+        monkeypatch.setattr(
+            extract_mod, "_pdf_text", lambda path: "Mood Fabrics\x00\nTotal: $100.00\x01"
+        )
+
+        file = make_discovered_file(pdf_path)
+        client = FakeClient(
+            response={
+                "date": "2026-09-01",
+                "supplier_name": "Mood Fabrics",
+                "total": "100.00",
+                "sales_tax": "0",
+                "net": "100.00",
+                "tax_rate": "0",
+                "currency": "USD",
+                "payment_method_hint": None,
+                "line_summary": "Fabric",
+                "confidence": 0.9,
+                "notes": [],
+            }
+        )
+
+        extract_receipt(file, client, cfg, PAYMENT_METHODS)
+
+        prompt, files = client.calls[0]
+        assert "\x00" not in prompt
+        assert "\x01" not in prompt
+        assert "Mood Fabrics" in prompt
+        assert "Total: $100.00" in prompt
+
+
+# ---------------------------------------------------------------------------
+# P4: strip the Dropbox File Request uploader name out of the filename supplier hint
+# ---------------------------------------------------------------------------
+
+
+class TestApplyFilenameStrip:
+    STRIP_LIST = ["Yemi Osunkoya", "Danny Barnett", "D Barnett"]
+
+    def test_strips_trailing_uploader_name(self) -> None:
+        assert apply_filename_strip("Guide Fabrics INC Yemi Osunkoya", self.STRIP_LIST) == "Guide Fabrics INC"
+
+    def test_strips_uploader_name_short_supplier(self) -> None:
+        assert apply_filename_strip("TMobile Yemi Osunkoya", self.STRIP_LIST) == "TMobile"
+
+    def test_uploader_name_only_yields_none(self) -> None:
+        assert apply_filename_strip("Yemi Osunkoya", self.STRIP_LIST) is None
+
+    def test_none_input_yields_none(self) -> None:
+        assert apply_filename_strip(None, self.STRIP_LIST) is None
+
+    def test_no_match_left_unchanged(self) -> None:
+        assert apply_filename_strip("Mood Fabrics", self.STRIP_LIST) == "Mood Fabrics"
+
+    def test_case_insensitive_and_dash_separated(self) -> None:
+        assert apply_filename_strip("Mood Fabrics - yemi osunkoya", self.STRIP_LIST) == "Mood Fabrics"
+
+    def test_extract_receipt_applies_filename_strip_to_hint(
+        self, tmp_repo: Path, cfg: Config, monkeypatch
+    ) -> None:
+        """cfg.receipts.filename_strip (seeded from config.toml: Yemi Osunkoya, Danny Barnett,
+        D Barnett) must be applied to the filename-derived supplier hint before it reaches the
+        prompt and before it's used as a fallback supplier name."""
+        receipts_dir = tmp_repo / "imports" / "receipts"
+        receipts_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = receipts_dir / "2026-06-12 - Guide Fabrics INC Yemi Osunkoya.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4 fake")
+        monkeypatch.setattr(extract_mod, "_pdf_text", lambda path: "")
+
+        file = make_discovered_file(pdf_path)
+        # Model fails to extract a supplier name; validate() should fall back to the stripped hint.
+        client = FakeClient(
+            response={
+                "date": "2026-06-12",
+                "supplier_name": None,
+                "total": "50.00",
+                "sales_tax": "0",
+                "net": "50.00",
+                "tax_rate": "0",
+                "currency": "USD",
+                "payment_method_hint": None,
+                "line_summary": "Fabric",
+                "confidence": 0.9,
+                "notes": [],
+            }
+        )
+
+        result = extract_receipt(file, client, cfg, PAYMENT_METHODS)
+
+        prompt, _files = client.calls[0]
+        assert "Filename suggests supplier: Guide Fabrics INC\n" in prompt
+        assert "Filename suggests supplier: Guide Fabrics INC Yemi Osunkoya" not in prompt
+        assert result.supplier_name == "Guide Fabrics INC"
+
+
+# ---------------------------------------------------------------------------
 # extract_receipt: JSON mapping, unsupported types, ClaudeError
 # ---------------------------------------------------------------------------
 
@@ -460,6 +582,79 @@ class TestValidate:
         assert result.supplier_name == "Mood Fabrics"
         assert "supplier missing" not in result.notes
 
+    # -----------------------------------------------------------------
+    # P1: validate() records genuine problems separately from notes
+    # -----------------------------------------------------------------
+
+    def test_reconciliation_failure_is_recorded_as_a_problem(self, cfg: Config) -> None:
+        extract = make_extract(net=Decimal("100.00"), sales_tax=Decimal("8.88"), total=Decimal("500.00"))
+        result = validate(extract, cfg)
+        assert any("do not reconcile" in n for n in result.notes)
+        assert any("do not reconcile" in p for p in result.raw["_problems"])
+
+    def test_non_usd_currency_is_recorded_as_a_problem(self, cfg: Config) -> None:
+        extract = make_extract(currency="GBP")
+        result = validate(extract, cfg)
+        assert any("GBP" in p for p in result.raw["_problems"])
+
+    def test_date_missing_is_recorded_as_a_problem(self, cfg: Config) -> None:
+        extract = make_extract(date=None)
+        result = validate(extract, cfg)
+        assert "date missing" in result.raw["_problems"]
+
+    def test_supplier_missing_is_recorded_as_a_problem(self, cfg: Config) -> None:
+        extract = make_extract(supplier_name=None)
+        result = validate(extract, cfg)
+        assert "supplier missing" in result.raw["_problems"]
+
+    def test_model_observation_alone_is_not_a_problem(self, cfg: Config) -> None:
+        """A purely observational model note ('receipt slightly creased but legible') must not end
+        up in _problems: only validate()'s own findings do."""
+        extract = make_extract(notes=["receipt slightly creased but legible"])
+        result = validate(extract, cfg)
+        assert "receipt slightly creased but legible" in result.notes
+        assert "_problems" not in result.raw
+
+    # -----------------------------------------------------------------
+    # P2: no-tax-line handling (most purchases here are resale, no sales tax)
+    # -----------------------------------------------------------------
+
+    def test_total_only_defaults_net_to_total_and_tax_to_zero(self, cfg: Config) -> None:
+        extract = make_extract(total=Decimal("100.00"), net=None, sales_tax=None)
+        result = validate(extract, cfg)
+        assert result.net == Decimal("100.00")
+        assert result.sales_tax == Decimal("0")
+        assert result.tax_rate == Decimal("0")
+        assert "no tax shown; net = total" in result.notes
+        assert "_problems" not in result.raw
+
+    def test_net_only_defaults_total_to_net_and_tax_to_zero(self, cfg: Config) -> None:
+        extract = make_extract(total=None, net=Decimal("100.00"), sales_tax=None)
+        result = validate(extract, cfg)
+        assert result.total == Decimal("100.00")
+        assert result.sales_tax == Decimal("0")
+        assert "no tax shown; net = total" in result.notes
+        assert "_problems" not in result.raw
+
+    def test_negative_derived_tax_is_a_problem(self, cfg: Config) -> None:
+        extract = make_extract(total=Decimal("50.00"), net=Decimal("100.00"), sales_tax=None)
+        result = validate(extract, cfg)
+        assert any("do not reconcile" in p for p in result.raw["_problems"])
+
+    def test_total_and_net_both_missing_is_total_missing_problem(self, cfg: Config) -> None:
+        extract = make_extract(total=None, net=None, sales_tax=Decimal("8.88"))
+        result = validate(extract, cfg)
+        assert result.total is None
+        assert result.net is None
+        assert "total missing" in result.notes
+        assert "total missing" in result.raw["_problems"]
+
+    def test_total_present_net_and_tax_both_missing_is_not_total_missing(self, cfg: Config) -> None:
+        """total is present (net/tax got defaulted from it), so 'total missing' must not fire."""
+        extract = make_extract(total=Decimal("100.00"), net=None, sales_tax=None)
+        result = validate(extract, cfg)
+        assert "total missing" not in result.notes
+
 
 # ---------------------------------------------------------------------------
 # to_purchase_row
@@ -505,6 +700,18 @@ class TestToPurchaseRow:
         assert row.total == Decimal("0")
         assert "amount missing" in row.notes
 
+    def test_ok_when_total_present_but_net_and_tax_missing(self, categories: Categories, cfg: Config) -> None:
+        """P1: the Review decision keys off extract.total being None, not net/sales_tax -- those
+        are always filled in by validate() when total is present, so their absence alone (an
+        artificial case here, bypassing validate()) must not flag the row."""
+        extract = make_extract(total=Decimal("100.00"), net=None, sales_tax=None)
+        match = make_match()
+        row = to_purchase_row(extract, match, categories, cfg, datetime(2026, 9, 2))
+        assert row.status == "OK"
+        assert row.net == Decimal("0")
+        assert row.sales_tax == Decimal("0")
+        assert row.total == Decimal("100.00")
+
     def test_review_when_invalid_category(self, categories: Categories, cfg: Config) -> None:
         extract = make_extract()
         match = make_match(default_category="Not A Real Category")
@@ -513,8 +720,21 @@ class TestToPurchaseRow:
         assert row.category == ""
         assert row.schedule_c == ""
 
-    def test_review_when_notes_present(self, categories: Categories, cfg: Config) -> None:
+    def test_ok_when_only_observational_notes_present(self, categories: Categories, cfg: Config) -> None:
+        """P1: a purely observational model note (no validate() problem recorded) must not flag the
+        row for review -- this replaces the old "any note => Review" behaviour that flagged every
+        receipt because the model always adds an observation."""
+        extract = make_extract(notes=["receipt slightly creased but legible"])
+        match = make_match()
+        row = to_purchase_row(extract, match, categories, cfg, datetime(2026, 9, 2))
+        assert row.status == "OK"
+        assert "receipt slightly creased but legible" in row.notes
+
+    def test_review_when_problems_present(self, categories: Categories, cfg: Config) -> None:
+        """A genuine validate() problem (recorded in extract.raw['_problems']) still flags the row,
+        even though it also appears in .notes as plain text."""
         extract = make_extract(notes=["currency GBP: convert to USD and note the rate"])
+        extract.raw["_problems"] = ["currency GBP: convert to USD and note the rate"]
         match = make_match()
         row = to_purchase_row(extract, match, categories, cfg, datetime(2026, 9, 2))
         assert row.status == "Review"

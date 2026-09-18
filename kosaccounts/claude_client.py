@@ -36,9 +36,10 @@ class ClaudeClient:
         prompt tells the model to Read; they are only appended to the prompt as a list, the CLI is
         never given them directly."""
 
-        # Build full prompt
+        # Build full prompt. Defensively strip NUL bytes: subprocess argv cannot contain them, and
+        # they can end up here via text extracted from PDFs/OCR even after upstream sanitisation.
         files_list = list(files)
-        full_prompt = prompt
+        full_prompt = prompt.replace("\x00", "")
         if files_list:
             full_prompt += "\n\nFiles to read (absolute paths):\n"
             full_prompt += "\n".join(str(f) for f in files_list)

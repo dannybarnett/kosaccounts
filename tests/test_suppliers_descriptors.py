@@ -43,6 +43,8 @@ def book(cfg):
         ("Guide Fabrics Inc.", "Guide Fabrics"),
         ("Pacific Trimmings", "Pacific Trimming"),
         ("GODADDY.COM", "GoDaddy"),
+        ("Recur Debit Card Purchase MUNALUCHI LLC ...1272 NJ", "Munaluchi"),
+        ("Debit Card Purchase PACIFIC TRIMMING NEW YORK NY", "Pacific Trimming"),
     ],
 )
 def test_known_descriptors_match(book, descriptor, expected):

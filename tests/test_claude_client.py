@@ -278,6 +278,36 @@ class TestClaudeClientFake:
 
         assert str(working_dir) in result
 
+    def test_null_bytes_stripped_from_prompt(self, tmp_path):
+        """Test that NUL bytes in the prompt are stripped before being passed to subprocess argv
+        (embedded NULs raise ValueError from subprocess otherwise)."""
+
+        fake_claude = self._make_fake_command(tmp_path, "fake_claude", '''\
+            import json
+            import sys
+            prompt = None
+            for i, arg in enumerate(sys.argv[1:]):
+                if arg == "-p" and i + 1 < len(sys.argv) - 1:
+                    prompt = sys.argv[i + 2]
+                    break
+            print(json.dumps({"result": prompt if prompt else "no prompt"}))
+            ''')
+
+        cfg = ClaudeConfig(
+            command=fake_claude,
+            model="",
+            timeout_seconds=5,
+            max_turns=2,
+            retries=0,
+            allowed_tools=["Read"]
+        )
+
+        client = ClaudeClient(cfg)
+        result = client.run_text("before\x00after")
+
+        assert "\x00" not in result
+        assert result == "beforeafter"
+
     def test_cwd_default(self, tmp_path):
         """Test that cwd defaults to current directory."""
 
