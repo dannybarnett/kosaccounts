@@ -1,14 +1,14 @@
-"""Turn one receipt file into a ReceiptExtract, then into a PurchaseRow.
+"""Turn one expense file into an ExpenseExtract, then into a PurchaseRow.
 
-Flow for extract_receipt():
+Flow for extract_expense():
 1. parse_filename_hint(file.filename) -> (date, supplier) hint.
 2. If PDF: pdfplumber text (may be empty for scans). If image (jpg/png/heic/webp/tiff): convert to
-   JPEG <= cfg.receipts.max_image_px on the long side into a sibling ".converted/" folder next to the
+   JPEG <= cfg.expenses.max_image_px on the long side into a sibling ".converted/" folder next to the
    file (idempotent), and hand that path to the model.
-3. Build prompt (receipts/prompts.py) with hints + any PDF text + allowed payment methods; call
-   client.run_json(prompt, files=[path]) and map to ReceiptExtract (Decimal for money, ISO date).
+3. Build prompt (expenses/prompts.py) with hints + any PDF text + allowed payment methods; call
+   client.run_json(prompt, files=[path]) and map to ExpenseExtract (Decimal for money, ISO date).
 4. validate(): fill net/tax/total when exactly one is missing; check net+tax==total within
-   cfg.receipts.amount_tolerance; derive tax_rate if absent; non-USD -> note "Currency XXX; converted?";
+   cfg.expenses.amount_tolerance; derive tax_rate if absent; non-USD -> note "Currency XXX; converted?";
    date missing -> use hint; supplier missing -> use hint. Every problem appends to .notes.
 
 CONTRACT (implement; do not change signatures):
@@ -27,8 +27,8 @@ from dateutil import parser as dateutil_parser
 from kosaccounts.categories import Categories
 from kosaccounts.claude_client import ClaudeClient, ClaudeError
 from kosaccounts.config import Config
-from kosaccounts.models import DiscoveredFile, PurchaseRow, ReceiptExtract, SupplierMatch
-from kosaccounts.receipts.prompts import receipt_prompt
+from kosaccounts.models import DiscoveredFile, ExpenseExtract, PurchaseRow, SupplierMatch
+from kosaccounts.expenses.prompts import expense_prompt
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".heic", ".heif"}
 PDF_SUFFIXES = {".pdf"}
@@ -199,9 +199,9 @@ def _to_notes(value) -> list[str]:
     return []
 
 
-def extract_receipt(file: DiscoveredFile, client: ClaudeClient, cfg: Config, payment_methods: list[str]) -> ReceiptExtract:
+def extract_expense(file: DiscoveredFile, client: ClaudeClient, cfg: Config, payment_methods: list[str]) -> ExpenseExtract:
     date_hint, raw_supplier_hint = parse_filename_hint(file.filename)
-    supplier_hint = apply_filename_strip(raw_supplier_hint, cfg.receipts.filename_strip)
+    supplier_hint = apply_filename_strip(raw_supplier_hint, cfg.expenses.filename_strip)
     hints = {"date": date_hint, "supplier": supplier_hint}
 
     suffix = file.path.suffix.lower()
@@ -212,9 +212,9 @@ def extract_receipt(file: DiscoveredFile, client: ClaudeClient, cfg: Config, pay
     elif suffix in IMAGE_SUFFIXES:
         pdf_text = None
         try:
-            model_path = _convert_image_for_model(file.path, cfg.receipts.max_image_px)
+            model_path = _convert_image_for_model(file.path, cfg.expenses.max_image_px)
         except Exception as exc:
-            extract = ReceiptExtract(
+            extract = ExpenseExtract(
                 source_file=file.relative_path,
                 confidence=0.0,
                 notes=[f"image conversion failed: {exc}"],
@@ -222,7 +222,7 @@ def extract_receipt(file: DiscoveredFile, client: ClaudeClient, cfg: Config, pay
             extract.raw["_hints"] = {"date": date_hint, "supplier": supplier_hint}
             return validate(extract, cfg)
     else:
-        extract = ReceiptExtract(
+        extract = ExpenseExtract(
             source_file=file.relative_path,
             confidence=0.0,
             notes=["unsupported file type"],
@@ -230,12 +230,12 @@ def extract_receipt(file: DiscoveredFile, client: ClaudeClient, cfg: Config, pay
         extract.raw["_hints"] = {"date": date_hint, "supplier": supplier_hint}
         return validate(extract, cfg)
 
-    prompt = receipt_prompt(model_path, date_hint, supplier_hint, pdf_text, payment_methods)
+    prompt = expense_prompt(model_path, date_hint, supplier_hint, pdf_text, payment_methods)
 
     try:
         data = client.run_json(prompt, files=[model_path])
     except ClaudeError as exc:
-        extract = ReceiptExtract(
+        extract = ExpenseExtract(
             source_file=file.relative_path,
             confidence=0.0,
             notes=[f"model extraction failed: {exc}"],
@@ -243,7 +243,7 @@ def extract_receipt(file: DiscoveredFile, client: ClaudeClient, cfg: Config, pay
         extract.raw["_hints"] = {"date": date_hint, "supplier": supplier_hint}
         return validate(extract, cfg)
 
-    extract = ReceiptExtract(
+    extract = ExpenseExtract(
         source_file=file.relative_path,
         date=_to_date(data.get("date")),
         supplier_name=(data.get("supplier_name") or None),
@@ -266,7 +266,7 @@ _RECONCILE_PROBLEM = "amounts do not reconcile: net+tax != total"
 _NO_TAX_NOTE = "no tax shown; net = total"
 
 
-def validate(extract: ReceiptExtract, cfg: Config) -> ReceiptExtract:
+def validate(extract: ExpenseExtract, cfg: Config) -> ExpenseExtract:
     """Mutates and returns `extract`; never raises for data problems.
 
     Model observations (whatever the model put in extract.notes) are left alone and never treated
@@ -277,7 +277,7 @@ def validate(extract: ReceiptExtract, cfg: Config) -> ReceiptExtract:
     sales tax), so a receipt with a total but no tax line is normal, not a defect.
     """
     try:
-        tolerance = Decimal(str(cfg.receipts.amount_tolerance))
+        tolerance = Decimal(str(cfg.expenses.amount_tolerance))
     except InvalidOperation:
         tolerance = Decimal("0.01")
 
@@ -321,7 +321,7 @@ def validate(extract: ReceiptExtract, cfg: Config) -> ReceiptExtract:
             rate = (extract.sales_tax / extract.net * 100).quantize(Decimal("0.001"))
             extract.tax_rate = rate
 
-    if extract.currency and extract.currency != cfg.receipts.default_currency:
+    if extract.currency and extract.currency != cfg.expenses.default_currency:
         msg = f"currency {extract.currency}: convert to USD and note the rate"
         extract.notes.append(msg)
         problems.append(msg)
@@ -373,14 +373,22 @@ _METHOD_ALIASES = {
 }
 
 
-def _normalise_payment_method(hint: Optional[str], payment_methods: list[str]) -> str:
-    """Map a raw payment-method hint onto one of the known `payment_methods` names."""
+def _normalise_payment_method(
+    hint: Optional[str], payment_methods: list[str], method_map: Optional[dict[str, str]] = None
+) -> str:
+    """Map a raw payment-method hint onto one of the known `payment_methods` names.
+    `method_map` (config expenses.payment_method_map: lower-cased substring -> name) is checked
+    first, so business-specific facts like "the Capital One debit card is a Discover" win."""
     if not hint:
         return ""
 
     hint_lower = hint.strip().lower()
     if not hint_lower:
         return ""
+
+    for keyword, name in (method_map or {}).items():
+        if keyword.strip().lower() in hint_lower:
+            return name
 
     methods_lower = {m.lower(): m for m in payment_methods}
 
@@ -403,14 +411,14 @@ def _normalise_payment_method(hint: Optional[str], payment_methods: list[str]) -
 
 
 def to_purchase_row(
-    extract: ReceiptExtract,
+    extract: ExpenseExtract,
     match: SupplierMatch,
     categories: Categories,
     cfg: Config,
     processed_on: datetime,
 ) -> PurchaseRow:
     """Status is "Review" if, and only if: match.is_new, category invalid/empty,
-    extract.confidence < cfg.receipts.min_confidence (this also covers extraction failure, which
+    extract.confidence < cfg.expenses.min_confidence (this also covers extraction failure, which
     reports confidence 0), extract.total is None (amount missing), or extract.raw["_problems"] is
     non-empty (validate()'s own findings: unreconciled amounts, non-USD currency, missing
     date/supplier/total). Model observations in extract.notes are never, by themselves, a reason to
@@ -425,7 +433,6 @@ def to_purchase_row(
     category = ""
     if match.default_category and categories.is_valid(match.default_category):
         category = categories.canonical(match.default_category) or match.default_category
-    schedule_c = categories.schedule_c_for(category) or "" if category else ""
 
     def money(value: Optional[Decimal]) -> Decimal:
         if value is None:
@@ -439,7 +446,9 @@ def to_purchase_row(
     total = money(extract.total)
     tax_rate = extract.tax_rate if extract.tax_rate is not None else Decimal("0")
 
-    payment_method = _normalise_payment_method(extract.payment_method_hint, cfg_payment_methods(cfg))
+    payment_method = _normalise_payment_method(
+        extract.payment_method_hint, cfg_payment_methods(cfg), cfg.expenses.payment_method_map
+    )
 
     row_date = extract.date
     if row_date is None:
@@ -452,7 +461,7 @@ def to_purchase_row(
     if (
         match.is_new
         or not category
-        or extract.confidence < cfg.receipts.min_confidence
+        or extract.confidence < cfg.expenses.min_confidence
         or extract.confidence <= 0
         or total_missing
         or bool(problems)
@@ -463,7 +472,6 @@ def to_purchase_row(
         date=row_date,
         company=company,
         category=category,
-        schedule_c=schedule_c,
         net=net,
         sales_tax=sales_tax,
         total=total,

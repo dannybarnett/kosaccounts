@@ -1,0 +1,25 @@
+[Unit]
+Description=Kosaccounts Dropbox listener (Stage 2: long-poll and pull into imports/)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/storage/docs/kosaccounts
+
+[Service]
+Type=simple
+User=dannybarnett
+Group=dannybarnett
+WorkingDirectory=/home/dannybarnett/claude-coding/kosaccounts
+EnvironmentFile=/etc/kosaccounts.env
+Environment=HOME=/home/dannybarnett
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/dannybarnett/claude-coding/kosaccounts/.venv/bin/python -m kosaccounts intake listen
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

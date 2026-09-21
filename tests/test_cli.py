@@ -47,9 +47,9 @@ class TestBuildParser:
 
     def test_run_subcommand_flags(self) -> None:
         parser = build_parser()
-        args = parser.parse_args(["run", "--dry-run", "--stage", "receipt", "--stage", "bank"])
+        args = parser.parse_args(["run", "--dry-run", "--stage", "expense", "--stage", "bank"])
         assert args.dry_run is True
-        assert args.stage == ["receipt", "bank"]
+        assert args.stage == ["expense", "bank"]
         assert args.func.__name__ == "cmd_run"
 
     def test_seed_subcommand_default_func(self) -> None:
@@ -84,16 +84,16 @@ class TestMainNoSubcommand:
 
 class TestScan:
     def test_lists_new_files(self, cfg: Config, capsys: pytest.CaptureFixture[str]) -> None:
-        receipt_path = cfg.paths.imports / "receipts" / "receipt1.pdf"
-        receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        receipt_path.write_bytes(b"%PDF-1.4 fake receipt")
+        expense_path = cfg.paths.imports / "expenses" / "expense1.pdf"
+        expense_path.parent.mkdir(parents=True, exist_ok=True)
+        expense_path.write_bytes(b"%PDF-1.4 fake receipt")
 
         result = main(["--config", _config_path(cfg), "scan"])
         assert result == 0
 
         captured = capsys.readouterr()
-        size = receipt_path.stat().st_size
-        assert f"receipt\treceipts/receipt1.pdf\t{size}" in captured.out
+        size = expense_path.stat().st_size
+        assert f"expense\texpenses/expense1.pdf\t{size}" in captured.out
         assert "1 new files (1 total)" in captured.out
 
     def test_no_files_reports_zero(self, cfg: Config, capsys: pytest.CaptureFixture[str]) -> None:
@@ -116,6 +116,58 @@ class TestRun:
         captured = capsys.readouterr()
         assert "nothing to do" in captured.out
 
+    def test_folder_argument_matching_stage_is_accepted(
+        self, cfg: Config, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The watcher invokes `run --stage expense <imports_folder>`; the trailing folder
+        argument must not be rejected by argparse, and must agree with an explicit --stage."""
+        folder = str(cfg.paths.imports / "expenses")
+        result = main(
+            ["--config", _config_path(cfg), "run", "--dry-run", "--stage", "expense", folder]
+        )
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "nothing to do" in captured.out
+
+    def test_folder_argument_alone_derives_stage(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """With no --stage given, the folder argument's basename picks the stage."""
+        import kosaccounts.cli as cli_module
+
+        captured_stages: dict = {}
+        original_run_pipeline = cli_module.run_pipeline
+
+        def spy_run_pipeline(cfg_, dry_run, stages):
+            captured_stages["stages"] = stages
+            return original_run_pipeline(cfg_, dry_run=dry_run, stages=stages)
+
+        monkeypatch.setattr(cli_module, "run_pipeline", spy_run_pipeline)
+
+        folder = str(cfg.paths.imports / "bank")
+        result = main(["--config", _config_path(cfg), "run", "--dry-run", folder])
+        assert result == 0
+        assert captured_stages["stages"] == ["bank"]
+
+    def test_folder_argument_contradicting_stage_returns_2(
+        self, cfg: Config, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        folder = str(cfg.paths.imports / "expenses")
+        result = main(
+            ["--config", _config_path(cfg), "run", "--dry-run", "--stage", "bank", folder]
+        )
+        assert result == 2
+        captured = capsys.readouterr()
+        assert "contradicts" in captured.err
+
+    def test_unrecognised_folder_argument_returns_2(
+        self, cfg: Config, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        result = main(["--config", _config_path(cfg), "run", "--dry-run", "/tmp/not-a-folder"])
+        assert result == 2
+        captured = capsys.readouterr()
+        assert "Unrecognised imports folder" in captured.err
+
 
 # ---------------------------------------------------------------------------
 # review
@@ -132,7 +184,7 @@ class TestReview:
             writer.writerow(
                 ["Supplier", "Suggested category", "First seen", "Source file", "Context", "Occurrences"]
             )
-            writer.writerow(["New Co", "", "2026-09-01T10:00:00", "receipts/x.pdf", "some context", "1"])
+            writer.writerow(["New Co", "", "2026-09-01T10:00:00", "expenses/x.pdf", "some context", "1"])
 
         result = main(["--config", _config_path(cfg), "review", "--approve", "New Co=Fabric"])
         assert result == 0
@@ -181,11 +233,11 @@ class TestReconcileLedger:
         ledger.append(
             LedgerEntry(
                 filename="gone.pdf",
-                relative_path="receipts/gone.pdf",
+                relative_path="expenses/gone.pdf",
                 sha256="deadbeef",
                 size=100,
                 date_processed=datetime(2026, 9, 1, 10, 0, 0),
-                stage="receipt",
+                stage="expense",
                 status="Processed",
                 rows_added=1,
                 notes="",
@@ -196,7 +248,7 @@ class TestReconcileLedger:
         assert result == 0
 
         captured = capsys.readouterr()
-        assert "receipts/gone.pdf (processed 2026-09-01)" in captured.out
+        assert "expenses/gone.pdf (processed 2026-09-01)" in captured.out
         assert "1 missing source file(s)" in captured.out
 
 

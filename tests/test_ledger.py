@@ -21,12 +21,12 @@ class TestLedger:
         # Create ledger and append an entry
         ledger1 = Ledger(ledger_path)
         entry1 = LedgerEntry(
-            filename="receipt.pdf",
-            relative_path="receipts/2026-09-01 - Mood.pdf",
+            filename="expense.pdf",
+            relative_path="expenses/2026-09-01 - Mood.pdf",
             sha256="abc123def456",
             size=1024,
             date_processed=datetime.fromisoformat("2026-09-18T10:30:00"),
-            stage="receipt",
+            stage="expense",
             status="Processed",
             rows_added=1,
             notes="",
@@ -37,7 +37,7 @@ class TestLedger:
         ledger2 = Ledger(ledger_path)
         entries = ledger2.entries()
         assert len(entries) == 1
-        assert entries[0].filename == "receipt.pdf"
+        assert entries[0].filename == "expense.pdf"
         assert entries[0].sha256 == "abc123def456"
         assert entries[0].rows_added == 1
 
@@ -47,12 +47,12 @@ class TestLedger:
         ledger = Ledger(ledger_path)
 
         entry = LedgerEntry(
-            filename="receipt.pdf",
-            relative_path="receipts/2026-09-01 - Mood.pdf",
+            filename="expense.pdf",
+            relative_path="expenses/2026-09-01 - Mood.pdf",
             sha256="abc123def456",
             size=1024,
             date_processed=datetime.fromisoformat("2026-09-18T10:30:00"),
-            stage="receipt",
+            stage="expense",
             status="Processed",
         )
         ledger.append(entry)
@@ -73,12 +73,12 @@ class TestLedger:
 
         # First append writes header + row
         entry1 = LedgerEntry(
-            filename="receipt1.pdf",
-            relative_path="receipts/2026-09-01 - Mood.pdf",
+            filename="expense1.pdf",
+            relative_path="expenses/2026-09-01 - Mood.pdf",
             sha256="abc123",
             size=1024,
             date_processed=datetime.fromisoformat("2026-09-18T10:30:00"),
-            stage="receipt",
+            stage="expense",
             status="Processed",
         )
         ledger.append(entry1)
@@ -90,12 +90,12 @@ class TestLedger:
 
         # Second append writes only row, not header
         entry2 = LedgerEntry(
-            filename="receipt2.pdf",
-            relative_path="receipts/2026-09-02 - Mood.pdf",
+            filename="expense2.pdf",
+            relative_path="expenses/2026-09-02 - Mood.pdf",
             sha256="def456",
             size=2048,
             date_processed=datetime.fromisoformat("2026-09-18T11:30:00"),
-            stage="receipt",
+            stage="expense",
             status="Processed",
         )
         ledger.append(entry2)
@@ -115,11 +115,11 @@ class TestLedger:
         ledger = Ledger(ledger_path)
         entry = LedgerEntry(
             filename="deleted.pdf",
-            relative_path="receipts/deleted.pdf",
+            relative_path="expenses/deleted.pdf",
             sha256="abc123",
             size=1024,
             date_processed=datetime.fromisoformat("2026-09-18T10:30:00"),
-            stage="receipt",
+            stage="expense",
             status="Processed",
         )
         ledger.append(entry)
@@ -133,22 +133,22 @@ class TestLedger:
         """missing_sources should not return entries for existing files."""
         ledger_path = tmp_path / "ledger.csv"
         imports_root = tmp_path / "imports"
-        receipts_dir = imports_root / "receipts"
-        receipts_dir.mkdir(parents=True)
+        expenses_dir = imports_root / "expenses"
+        expenses_dir.mkdir(parents=True)
 
         # Create a file
-        test_file = receipts_dir / "test.pdf"
+        test_file = expenses_dir / "test.pdf"
         test_file.write_text("test content")
 
         # Create a ledger entry for it
         ledger = Ledger(ledger_path)
         entry = LedgerEntry(
             filename="test.pdf",
-            relative_path="receipts/test.pdf",
+            relative_path="expenses/test.pdf",
             sha256="abc123",
             size=12,
             date_processed=datetime.fromisoformat("2026-09-18T10:30:00"),
-            stage="receipt",
+            stage="expense",
             status="Processed",
         )
         ledger.append(entry)
@@ -156,6 +156,91 @@ class TestLedger:
         # missing_sources should return empty list
         missing = ledger.missing_sources(imports_root)
         assert len(missing) == 0
+
+
+class TestEntriesForCanonicalPath:
+    """Tests for Ledger.entries_for_canonical_path."""
+
+    def test_matches_exact_path(self, tmp_path: Path) -> None:
+        ledger_path = tmp_path / "ledger.csv"
+        ledger = Ledger(ledger_path)
+        entry = LedgerEntry(
+            filename="X.pdf",
+            relative_path="expenses/X.pdf",
+            sha256="abc123",
+            size=10,
+            date_processed=datetime.fromisoformat("2026-09-18T10:30:00"),
+            stage="expense",
+            status="Processed",
+        )
+        ledger.append(entry)
+
+        assert ledger.entries_for_canonical_path("expenses/X.pdf") == [entry]
+
+    def test_matches_collision_suffixed_query_against_plain_ledger_entry(self, tmp_path: Path) -> None:
+        """A re-upload arrives as "X__<hash8>.pdf"; the ledger holds the original "X.pdf" entry."""
+        ledger_path = tmp_path / "ledger.csv"
+        ledger = Ledger(ledger_path)
+        entry = LedgerEntry(
+            filename="X.pdf",
+            relative_path="expenses/X.pdf",
+            sha256="abc123",
+            size=10,
+            date_processed=datetime.fromisoformat("2026-09-18T10:30:00"),
+            stage="expense",
+            status="Processed",
+        )
+        ledger.append(entry)
+
+        assert ledger.entries_for_canonical_path("expenses/X__a1b2c3d4.pdf") == [entry]
+
+    def test_matches_plain_query_against_collision_suffixed_ledger_entry(self, tmp_path: Path) -> None:
+        """The reverse direction: the ledger holds an entry recorded under the collision name."""
+        ledger_path = tmp_path / "ledger.csv"
+        ledger = Ledger(ledger_path)
+        entry = LedgerEntry(
+            filename="X__a1b2c3d4.pdf",
+            relative_path="expenses/X__a1b2c3d4.pdf",
+            sha256="abc123",
+            size=10,
+            date_processed=datetime.fromisoformat("2026-09-18T10:30:00"),
+            stage="expense",
+            status="Processed",
+        )
+        ledger.append(entry)
+
+        assert ledger.entries_for_canonical_path("expenses/X.pdf") == [entry]
+
+    def test_no_match_returns_empty(self, tmp_path: Path) -> None:
+        ledger_path = tmp_path / "ledger.csv"
+        ledger = Ledger(ledger_path)
+        assert ledger.entries_for_canonical_path("expenses/never-seen.pdf") == []
+
+    def test_returns_in_append_order(self, tmp_path: Path) -> None:
+        ledger_path = tmp_path / "ledger.csv"
+        ledger = Ledger(ledger_path)
+        entry1 = LedgerEntry(
+            filename="X.pdf",
+            relative_path="expenses/X.pdf",
+            sha256="hash1",
+            size=10,
+            date_processed=datetime.fromisoformat("2026-09-18T10:30:00"),
+            stage="expense",
+            status="Processed",
+        )
+        entry2 = LedgerEntry(
+            filename="X__a1b2c3d4.pdf",
+            relative_path="expenses/X__a1b2c3d4.pdf",
+            sha256="hash2",
+            size=11,
+            date_processed=datetime.fromisoformat("2026-09-19T10:30:00"),
+            stage="expense",
+            status="Processed",
+        )
+        ledger.append(entry1)
+        ledger.append(entry2)
+
+        assert ledger.entries_for_canonical_path("expenses/X.pdf") == [entry1, entry2]
 
 
 def test_append_creates_missing_data_directory(tmp_path):
@@ -166,7 +251,7 @@ def test_append_creates_missing_data_directory(tmp_path):
     path = tmp_path / "data" / "processing_log.csv"
     ledger = Ledger(path)
     ledger.append(
-        LedgerEntry("a.pdf", "receipts/a.pdf", "ab" * 32, 10, datetime(2026, 9, 18, 12, 0), "receipt", "Processed", 1, "")
+        LedgerEntry("a.pdf", "expenses/a.pdf", "ab" * 32, 10, datetime(2026, 9, 18, 12, 0), "expense", "Processed", 1, "")
     )
     assert path.exists()
     assert Ledger(path).has_hash("ab" * 32)

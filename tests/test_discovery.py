@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kosaccounts.discovery import discover, new_files, sha256_file
+from kosaccounts.discovery import canonical_relative_path, discover, new_files, sha256_file
 from kosaccounts.ledger import Ledger
 from kosaccounts.models import LedgerEntry
 
@@ -33,17 +33,17 @@ class TestSha256File:
 class TestDiscover:
     """Tests for discover function."""
 
-    def test_discover_files_in_receipts_and_bank(self, tmp_path: Path) -> None:
-        """discover should find files in receipts and bank folders."""
+    def test_discover_files_in_expenses_and_bank(self, tmp_path: Path) -> None:
+        """discover should find files in expenses and bank folders."""
         imports_root = tmp_path / "imports"
-        receipts_dir = imports_root / "receipts"
+        expenses_dir = imports_root / "expenses"
         bank_dir = imports_root / "bank"
-        receipts_dir.mkdir(parents=True)
+        expenses_dir.mkdir(parents=True)
         bank_dir.mkdir(parents=True)
 
         # Create test files
-        receipt_file = receipts_dir / "receipt.pdf"
-        receipt_file.write_text("receipt content")
+        expense_file = expenses_dir / "expense.pdf"
+        expense_file.write_text("expense content")
         bank_file = bank_dir / "statement.html"
         bank_file.write_text("bank content")
 
@@ -51,10 +51,10 @@ class TestDiscover:
         assert len(discovered) == 2
 
         # Check stages are correct
-        receipt_discovered = next(f for f in discovered if f.filename == "receipt.pdf")
+        expense_discovered = next(f for f in discovered if f.filename == "expense.pdf")
         bank_discovered = next(f for f in discovered if f.filename == "statement.html")
 
-        assert receipt_discovered.stage == "receipt"
+        assert expense_discovered.stage == "expense"
         assert bank_discovered.stage == "bank"
 
     def test_discover_ignores_invoices_folder(self, tmp_path: Path) -> None:
@@ -73,13 +73,13 @@ class TestDiscover:
     def test_discover_ignores_hidden_files(self, tmp_path: Path) -> None:
         """discover should ignore hidden files."""
         imports_root = tmp_path / "imports"
-        receipts_dir = imports_root / "receipts"
-        receipts_dir.mkdir(parents=True)
+        expenses_dir = imports_root / "expenses"
+        expenses_dir.mkdir(parents=True)
 
         # Create a hidden file and a normal file
-        hidden_file = receipts_dir / ".hidden"
+        hidden_file = expenses_dir / ".hidden"
         hidden_file.write_text("hidden")
-        normal_file = receipts_dir / "normal.pdf"
+        normal_file = expenses_dir / "normal.pdf"
         normal_file.write_text("normal")
 
         discovered = discover(imports_root)
@@ -89,13 +89,13 @@ class TestDiscover:
     def test_discover_ignores_zero_byte_files(self, tmp_path: Path) -> None:
         """discover should ignore zero-byte files."""
         imports_root = tmp_path / "imports"
-        receipts_dir = imports_root / "receipts"
-        receipts_dir.mkdir(parents=True)
+        expenses_dir = imports_root / "expenses"
+        expenses_dir.mkdir(parents=True)
 
         # Create a zero-byte file and a normal file
-        zero_file = receipts_dir / "zero.pdf"
+        zero_file = expenses_dir / "zero.pdf"
         zero_file.write_text("")
-        normal_file = receipts_dir / "normal.pdf"
+        normal_file = expenses_dir / "normal.pdf"
         normal_file.write_text("content")
 
         discovered = discover(imports_root)
@@ -105,15 +105,15 @@ class TestDiscover:
     def test_discover_ignores_partial_files(self, tmp_path: Path) -> None:
         """discover should ignore *.partial and .~tmp~* files."""
         imports_root = tmp_path / "imports"
-        receipts_dir = imports_root / "receipts"
-        receipts_dir.mkdir(parents=True)
+        expenses_dir = imports_root / "expenses"
+        expenses_dir.mkdir(parents=True)
 
         # Create files to be ignored and a normal file
-        partial_file = receipts_dir / "upload.pdf.partial"
+        partial_file = expenses_dir / "upload.pdf.partial"
         partial_file.write_text("partial")
-        tmp_file = receipts_dir / ".~tmp~file"
+        tmp_file = expenses_dir / ".~tmp~file"
         tmp_file.write_text("tmp")
-        normal_file = receipts_dir / "normal.pdf"
+        normal_file = expenses_dir / "normal.pdf"
         normal_file.write_text("normal")
 
         discovered = discover(imports_root)
@@ -123,16 +123,16 @@ class TestDiscover:
     def test_discover_sorted_by_relative_path(self, tmp_path: Path) -> None:
         """discover should return files sorted by relative_path."""
         imports_root = tmp_path / "imports"
-        receipts_dir = imports_root / "receipts"
-        receipts_dir.mkdir(parents=True)
+        expenses_dir = imports_root / "expenses"
+        expenses_dir.mkdir(parents=True)
 
         # Create files in non-alphabetical order
         for name in ["zebra.pdf", "apple.pdf", "banana.pdf"]:
-            (receipts_dir / name).write_text(name)
+            (expenses_dir / name).write_text(name)
 
         discovered = discover(imports_root)
         assert len(discovered) == 3
-        # Should be sorted by relative_path (all in receipts/)
+        # Should be sorted by relative_path (all in expenses/)
         assert discovered[0].filename == "apple.pdf"
         assert discovered[1].filename == "banana.pdf"
         assert discovered[2].filename == "zebra.pdf"
@@ -140,8 +140,8 @@ class TestDiscover:
     def test_discover_posix_separators(self, tmp_path: Path) -> None:
         """discover should use POSIX separators in relative_path."""
         imports_root = tmp_path / "imports"
-        receipts_dir = imports_root / "receipts"
-        subdir = receipts_dir / "subfolder"
+        expenses_dir = imports_root / "expenses"
+        subdir = expenses_dir / "subfolder"
         subdir.mkdir(parents=True)
 
         test_file = subdir / "test.pdf"
@@ -150,7 +150,7 @@ class TestDiscover:
         discovered = discover(imports_root)
         assert len(discovered) == 1
         # On all platforms, should use forward slashes
-        assert discovered[0].relative_path == "receipts/subfolder/test.pdf"
+        assert discovered[0].relative_path == "expenses/subfolder/test.pdf"
 
 
 class TestNewFiles:
@@ -159,11 +159,11 @@ class TestNewFiles:
     def test_renamed_copy_with_same_hash_ignored(self, tmp_path: Path) -> None:
         """A renamed copy of an already-ledgered file should not be returned by new_files."""
         imports_root = tmp_path / "imports"
-        receipts_dir = imports_root / "receipts"
-        receipts_dir.mkdir(parents=True)
+        expenses_dir = imports_root / "expenses"
+        expenses_dir.mkdir(parents=True)
 
         # Create a file
-        original_file = receipts_dir / "original.pdf"
+        original_file = expenses_dir / "original.pdf"
         original_file.write_text("content")
 
         # Get its hash
@@ -174,17 +174,17 @@ class TestNewFiles:
         ledger = Ledger(ledger_path)
         entry = LedgerEntry(
             filename="original.pdf",
-            relative_path="receipts/original.pdf",
+            relative_path="expenses/original.pdf",
             sha256=file_hash,
             size=original_file.stat().st_size,
             date_processed=datetime.fromisoformat("2026-09-18T10:30:00"),
-            stage="receipt",
+            stage="expense",
             status="Processed",
         )
         ledger.append(entry)
 
         # Create a renamed copy
-        renamed_file = receipts_dir / "renamed.pdf"
+        renamed_file = expenses_dir / "renamed.pdf"
         renamed_file.write_text("content")  # Same content
 
         # Discover files
@@ -198,11 +198,11 @@ class TestNewFiles:
     def test_edited_copy_with_different_hash_returned(self, tmp_path: Path) -> None:
         """An edited copy with the same name but different hash should be returned."""
         imports_root = tmp_path / "imports"
-        receipts_dir = imports_root / "receipts"
-        receipts_dir.mkdir(parents=True)
+        expenses_dir = imports_root / "expenses"
+        expenses_dir.mkdir(parents=True)
 
         # Create a file
-        original_file = receipts_dir / "document.pdf"
+        original_file = expenses_dir / "document.pdf"
         original_file.write_text("content v1")
 
         # Get its hash
@@ -213,11 +213,11 @@ class TestNewFiles:
         ledger = Ledger(ledger_path)
         entry = LedgerEntry(
             filename="document.pdf",
-            relative_path="receipts/document.pdf",
+            relative_path="expenses/document.pdf",
             sha256=original_hash,
             size=original_file.stat().st_size,
             date_processed=datetime.fromisoformat("2026-09-18T10:30:00"),
-            stage="receipt",
+            stage="expense",
             status="Processed",
         )
         ledger.append(entry)
@@ -237,14 +237,49 @@ class TestNewFiles:
 
 
 def test_files_inside_hidden_directories_are_ignored(tmp_repo):
-    """receipts/.converted/*.jpg is a cache written by receipt extraction, not a new receipt."""
+    """expenses/.converted/*.jpg is a cache written by expense extraction, not a new expense."""
     from kosaccounts.discovery import discover
 
-    receipts = tmp_repo / "imports" / "receipts"
-    (receipts / "2026-09-01 - Mood.png").write_bytes(b"png-bytes")
-    cache = receipts / ".converted"
+    expenses = tmp_repo / "imports" / "expenses"
+    (expenses / "2026-09-01 - Mood.png").write_bytes(b"png-bytes")
+    cache = expenses / ".converted"
     cache.mkdir()
     (cache / "2026-09-01 - Mood.jpg").write_bytes(b"jpg-bytes")
 
     found = discover(tmp_repo / "imports")
-    assert [f.relative_path for f in found] == ["receipts/2026-09-01 - Mood.png"]
+    assert [f.relative_path for f in found] == ["expenses/2026-09-01 - Mood.png"]
+
+
+class TestCanonicalRelativePath:
+    """Tests for canonical_relative_path: strips a Dropbox listener collision suffix
+    ("stem__<hash8>.ext") from the file's stem, leaving everything else untouched."""
+
+    def test_strips_collision_suffix(self) -> None:
+        assert (
+            canonical_relative_path("expenses/2026-06-30 Guide Fabrics__a1b2c3d4.pdf")
+            == "expenses/2026-06-30 Guide Fabrics.pdf"
+        )
+
+    def test_path_without_suffix_unchanged(self) -> None:
+        assert (
+            canonical_relative_path("expenses/2026-06-30 Guide Fabrics.pdf")
+            == "expenses/2026-06-30 Guide Fabrics.pdf"
+        )
+
+    def test_uppercase_hex_not_stripped(self) -> None:
+        assert canonical_relative_path("expenses/X__A1B2C3D4.pdf") == "expenses/X__A1B2C3D4.pdf"
+
+    def test_seven_hex_chars_not_stripped(self) -> None:
+        assert canonical_relative_path("expenses/X__a1b2c3d.pdf") == "expenses/X__a1b2c3d.pdf"
+
+    def test_nine_hex_chars_not_stripped(self) -> None:
+        assert canonical_relative_path("expenses/X__a1b2c3d4e.pdf") == "expenses/X__a1b2c3d4e.pdf"
+
+    def test_only_last_component_touched(self) -> None:
+        assert (
+            canonical_relative_path("expenses__a1b2c3d4/X__a1b2c3d4.pdf")
+            == "expenses__a1b2c3d4/X.pdf"
+        )
+
+    def test_no_parent_directory(self) -> None:
+        assert canonical_relative_path("X__a1b2c3d4.pdf") == "X.pdf"

@@ -15,3 +15,11 @@ __pycache__/
 # local
 .env
 *.tmp
+
+# secrets (systemd EnvironmentFile lives in /etc, never here)
+*.env
+kosaccounts.env
+
+# one-off migration backups (financial data)
+data/*.bak-*
+output/*.bak-*

@@ -1,4 +1,4 @@
-"""Tests for kosaccounts.receipts.extract and kosaccounts.receipts.prompts."""
+"""Tests for kosaccounts.expenses.extract and kosaccounts.expenses.prompts."""
 
 from __future__ import annotations
 
@@ -15,17 +15,17 @@ from PIL import Image
 from kosaccounts.categories import Categories
 from kosaccounts.claude_client import ClaudeError
 from kosaccounts.config import Config
-from kosaccounts.models import DiscoveredFile, ReceiptExtract, SupplierMatch
-from kosaccounts.receipts import extract as extract_mod
-from kosaccounts.receipts.extract import (
+from kosaccounts.models import DiscoveredFile, ExpenseExtract, SupplierMatch
+from kosaccounts.expenses import extract as extract_mod
+from kosaccounts.expenses.extract import (
     apply_filename_strip,
-    extract_receipt,
+    extract_expense,
     parse_filename_hint,
     sanitize_pdf_text,
     to_purchase_row,
     validate,
 )
-from kosaccounts.receipts.prompts import RECEIPT_JSON_KEYS, receipt_prompt
+from kosaccounts.expenses.prompts import EXPENSE_JSON_KEYS, expense_prompt
 
 PAYMENT_METHODS = [
     "Mastercard",
@@ -94,8 +94,8 @@ def _payment_methods_csv(tmp_repo: Path) -> None:
 def make_discovered_file(path: Path, relative_path: Optional[str] = None) -> DiscoveredFile:
     return DiscoveredFile(
         path=path,
-        relative_path=relative_path or f"receipts/{path.name}",
-        stage="receipt",
+        relative_path=relative_path or f"expenses/{path.name}",
+        stage="expense",
         sha256="deadbeef",
         size=path.stat().st_size if path.exists() else 0,
     )
@@ -118,9 +118,9 @@ def make_match(
     )
 
 
-def make_extract(**overrides) -> ReceiptExtract:
+def make_extract(**overrides) -> ExpenseExtract:
     defaults = dict(
-        source_file="receipts/2026-09-01 - Mood.pdf",
+        source_file="expenses/2026-09-01 - Mood.pdf",
         date=date(2026, 9, 1),
         supplier_name="Mood Fabrics",
         total=Decimal("108.88"),
@@ -134,7 +134,7 @@ def make_extract(**overrides) -> ReceiptExtract:
         notes=[],
     )
     defaults.update(overrides)
-    return ReceiptExtract(**defaults)
+    return ExpenseExtract(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -177,51 +177,51 @@ class TestParseFilenameHint:
 
 
 # ---------------------------------------------------------------------------
-# receipt_prompt
+# expense_prompt
 # ---------------------------------------------------------------------------
 
 
-class TestReceiptPrompt:
+class TestExpensePrompt:
     def test_contains_path_hints_and_methods(self, tmp_path: Path) -> None:
         p = tmp_path / "receipt.jpg"
-        prompt = receipt_prompt(p, date(2026, 9, 1), "Mood Fabrics", None, PAYMENT_METHODS)
+        prompt = expense_prompt(p, date(2026, 9, 1), "Mood Fabrics", None, PAYMENT_METHODS)
         assert str(p) in prompt
         assert "2026-09-01" in prompt
         assert "Mood Fabrics" in prompt
         for method in PAYMENT_METHODS:
             assert method in prompt
-        for key in RECEIPT_JSON_KEYS:
+        for key in EXPENSE_JSON_KEYS:
             assert key in prompt
         assert "```" not in prompt
 
     def test_includes_truncated_pdf_text(self, tmp_path: Path) -> None:
         p = tmp_path / "receipt.pdf"
         long_text = "A" * 7000
-        prompt = receipt_prompt(p, None, None, long_text, PAYMENT_METHODS)
+        prompt = expense_prompt(p, None, None, long_text, PAYMENT_METHODS)
         assert "A" * 6000 in prompt
         assert "A" * 6001 not in prompt
 
     def test_no_pdf_text_block_when_none(self, tmp_path: Path) -> None:
         p = tmp_path / "receipt.jpg"
-        prompt = receipt_prompt(p, None, None, None, PAYMENT_METHODS)
+        prompt = expense_prompt(p, None, None, None, PAYMENT_METHODS)
         assert "BEGIN PDF TEXT" not in prompt
 
     def test_under_length_budget(self, tmp_path: Path) -> None:
         p = tmp_path / "receipt.jpg"
-        prompt = receipt_prompt(p, date(2026, 9, 1), "Mood Fabrics", None, PAYMENT_METHODS)
+        prompt = expense_prompt(p, date(2026, 9, 1), "Mood Fabrics", None, PAYMENT_METHODS)
         assert len(prompt) < 2500
 
 
 # ---------------------------------------------------------------------------
-# extract_receipt: image conversion
+# extract_expense: image conversion
 # ---------------------------------------------------------------------------
 
 
 class TestImageConversion:
     def test_converts_image_and_caches(self, tmp_repo: Path, cfg: Config) -> None:
-        receipts_dir = tmp_repo / "imports" / "receipts"
-        receipts_dir.mkdir(parents=True, exist_ok=True)
-        img_path = receipts_dir / "2026-09-01 - Mood.png"
+        expenses_dir = tmp_repo / "imports" / "expenses"
+        expenses_dir.mkdir(parents=True, exist_ok=True)
+        img_path = expenses_dir / "2026-09-01 - Mood.png"
         img = Image.new("RGB", (4000, 3000), color=(200, 100, 50))
         img.save(img_path)
 
@@ -242,12 +242,12 @@ class TestImageConversion:
             }
         )
 
-        extract_receipt(file, client, cfg, PAYMENT_METHODS)
+        extract_expense(file, client, cfg, PAYMENT_METHODS)
 
-        converted = receipts_dir / ".converted" / "2026-09-01 - Mood.jpg"
+        converted = expenses_dir / ".converted" / "2026-09-01 - Mood.jpg"
         assert converted.exists()
         with Image.open(converted) as converted_img:
-            assert max(converted_img.size) <= cfg.receipts.max_image_px
+            assert max(converted_img.size) <= cfg.expenses.max_image_px
 
         # Model was handed the converted path, not the original.
         prompt, files = client.calls[0]
@@ -258,20 +258,20 @@ class TestImageConversion:
         # Second call reuses the cached conversion (mtime unchanged).
         time.sleep(0.01)
         client2 = FakeClient(response=client.response)
-        extract_receipt(file, client2, cfg, PAYMENT_METHODS)
+        extract_expense(file, client2, cfg, PAYMENT_METHODS)
         assert converted.stat().st_mtime == mtime_before
 
 
 # ---------------------------------------------------------------------------
-# extract_receipt: PDF text branch (via monkeypatching the module's pdf-text helper)
+# extract_expense: PDF text branch (via monkeypatching the module's pdf-text helper)
 # ---------------------------------------------------------------------------
 
 
 class TestPdfBranch:
     def test_pdf_text_is_passed_to_prompt(self, tmp_repo: Path, cfg: Config, monkeypatch) -> None:
-        receipts_dir = tmp_repo / "imports" / "receipts"
-        receipts_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = receipts_dir / "2026-09-01 - Mood.pdf"
+        expenses_dir = tmp_repo / "imports" / "expenses"
+        expenses_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = expenses_dir / "2026-09-01 - Mood.pdf"
         pdf_path.write_bytes(b"%PDF-1.4 fake")
 
         monkeypatch.setattr(extract_mod, "_pdf_text", lambda path: "Mood Fabrics\nTotal: $100.00")
@@ -293,7 +293,7 @@ class TestPdfBranch:
             }
         )
 
-        result = extract_receipt(file, client, cfg, PAYMENT_METHODS)
+        result = extract_expense(file, client, cfg, PAYMENT_METHODS)
 
         prompt, files = client.calls[0]
         assert "Mood Fabrics" in prompt
@@ -302,9 +302,9 @@ class TestPdfBranch:
         assert result.total == Decimal("100.00")
 
     def test_pdf_text_extraction_failure_yields_none(self, tmp_repo: Path, cfg: Config, monkeypatch) -> None:
-        receipts_dir = tmp_repo / "imports" / "receipts"
-        receipts_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = receipts_dir / "2026-09-01 - Mood.pdf"
+        expenses_dir = tmp_repo / "imports" / "expenses"
+        expenses_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = expenses_dir / "2026-09-01 - Mood.pdf"
         pdf_path.write_bytes(b"not really a pdf")
 
         # Real pdfplumber will fail to parse this garbage; extraction should not raise.
@@ -324,7 +324,7 @@ class TestPdfBranch:
                 "notes": [],
             }
         )
-        result = extract_receipt(file, client, cfg, PAYMENT_METHODS)
+        result = extract_expense(file, client, cfg, PAYMENT_METHODS)
         assert result.total == Decimal("50.00")
 
 
@@ -343,15 +343,15 @@ class TestSanitizePdfText:
     def test_empty_string(self) -> None:
         assert sanitize_pdf_text("") == ""
 
-    def test_extract_receipt_strips_null_bytes_from_prompt(
+    def test_extract_expense_strips_null_bytes_from_prompt(
         self, tmp_repo: Path, cfg: Config, monkeypatch
     ) -> None:
         """Regression for a real failure: pdfplumber text containing \\x00 made ClaudeClient's
         subprocess call raise ValueError("embedded null byte"). The prompt handed to the model must
         never contain a NUL, whatever pdfplumber returned."""
-        receipts_dir = tmp_repo / "imports" / "receipts"
-        receipts_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = receipts_dir / "2026-09-01 - Mood.pdf"
+        expenses_dir = tmp_repo / "imports" / "expenses"
+        expenses_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = expenses_dir / "2026-09-01 - Mood.pdf"
         pdf_path.write_bytes(b"%PDF-1.4 fake")
 
         monkeypatch.setattr(
@@ -375,7 +375,7 @@ class TestSanitizePdfText:
             }
         )
 
-        extract_receipt(file, client, cfg, PAYMENT_METHODS)
+        extract_expense(file, client, cfg, PAYMENT_METHODS)
 
         prompt, files = client.calls[0]
         assert "\x00" not in prompt
@@ -410,15 +410,15 @@ class TestApplyFilenameStrip:
     def test_case_insensitive_and_dash_separated(self) -> None:
         assert apply_filename_strip("Mood Fabrics - yemi osunkoya", self.STRIP_LIST) == "Mood Fabrics"
 
-    def test_extract_receipt_applies_filename_strip_to_hint(
+    def test_extract_expense_applies_filename_strip_to_hint(
         self, tmp_repo: Path, cfg: Config, monkeypatch
     ) -> None:
-        """cfg.receipts.filename_strip (seeded from config.toml: Yemi Osunkoya, Danny Barnett,
+        """cfg.expenses.filename_strip (seeded from config.toml: Yemi Osunkoya, Danny Barnett,
         D Barnett) must be applied to the filename-derived supplier hint before it reaches the
         prompt and before it's used as a fallback supplier name."""
-        receipts_dir = tmp_repo / "imports" / "receipts"
-        receipts_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = receipts_dir / "2026-06-12 - Guide Fabrics INC Yemi Osunkoya.pdf"
+        expenses_dir = tmp_repo / "imports" / "expenses"
+        expenses_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = expenses_dir / "2026-06-12 - Guide Fabrics INC Yemi Osunkoya.pdf"
         pdf_path.write_bytes(b"%PDF-1.4 fake")
         monkeypatch.setattr(extract_mod, "_pdf_text", lambda path: "")
 
@@ -440,7 +440,7 @@ class TestApplyFilenameStrip:
             }
         )
 
-        result = extract_receipt(file, client, cfg, PAYMENT_METHODS)
+        result = extract_expense(file, client, cfg, PAYMENT_METHODS)
 
         prompt, _files = client.calls[0]
         assert "Filename suggests supplier: Guide Fabrics INC\n" in prompt
@@ -449,15 +449,15 @@ class TestApplyFilenameStrip:
 
 
 # ---------------------------------------------------------------------------
-# extract_receipt: JSON mapping, unsupported types, ClaudeError
+# extract_expense: JSON mapping, unsupported types, ClaudeError
 # ---------------------------------------------------------------------------
 
 
-class TestExtractReceiptMapping:
+class TestExtractExpenseMapping:
     def test_maps_string_amounts_with_dollar_and_commas(self, tmp_repo: Path, cfg: Config, monkeypatch) -> None:
-        receipts_dir = tmp_repo / "imports" / "receipts"
-        receipts_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = receipts_dir / "2026-09-01 - Mood.pdf"
+        expenses_dir = tmp_repo / "imports" / "expenses"
+        expenses_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = expenses_dir / "2026-09-01 - Mood.pdf"
         pdf_path.write_bytes(b"%PDF-1.4 fake")
         monkeypatch.setattr(extract_mod, "_pdf_text", lambda path: "")
 
@@ -478,7 +478,7 @@ class TestExtractReceiptMapping:
             }
         )
 
-        result = extract_receipt(file, client, cfg, PAYMENT_METHODS)
+        result = extract_expense(file, client, cfg, PAYMENT_METHODS)
 
         assert result.total == Decimal("1234.56")
         assert result.sales_tax == Decimal("100.00")
@@ -487,31 +487,31 @@ class TestExtractReceiptMapping:
         assert "multiple items" in result.notes
 
     def test_unsupported_file_type(self, tmp_repo: Path, cfg: Config) -> None:
-        receipts_dir = tmp_repo / "imports" / "receipts"
-        receipts_dir.mkdir(parents=True, exist_ok=True)
-        odd_path = receipts_dir / "2026-09-01 - Mood.txt"
+        expenses_dir = tmp_repo / "imports" / "expenses"
+        expenses_dir.mkdir(parents=True, exist_ok=True)
+        odd_path = expenses_dir / "2026-09-01 - Mood.txt"
         odd_path.write_text("not a receipt")
 
         file = make_discovered_file(odd_path)
         client = FakeClient(response={})
 
-        result = extract_receipt(file, client, cfg, PAYMENT_METHODS)
+        result = extract_expense(file, client, cfg, PAYMENT_METHODS)
 
         assert result.confidence == 0
         assert "unsupported file type" in result.notes
         assert client.calls == []
 
     def test_claude_error_yields_zero_confidence_note(self, tmp_repo: Path, cfg: Config, monkeypatch) -> None:
-        receipts_dir = tmp_repo / "imports" / "receipts"
-        receipts_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = receipts_dir / "2026-09-01 - Mood.pdf"
+        expenses_dir = tmp_repo / "imports" / "expenses"
+        expenses_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = expenses_dir / "2026-09-01 - Mood.pdf"
         pdf_path.write_bytes(b"%PDF-1.4 fake")
         monkeypatch.setattr(extract_mod, "_pdf_text", lambda path: "")
 
         file = make_discovered_file(pdf_path)
         client = FakeClient(error="boom")
 
-        result = extract_receipt(file, client, cfg, PAYMENT_METHODS)
+        result = extract_expense(file, client, cfg, PAYMENT_METHODS)
 
         assert result.confidence == 0
         assert any("model extraction failed" in n and "boom" in n for n in result.notes)
@@ -669,7 +669,6 @@ class TestToPurchaseRow:
         assert row.status == "OK"
         assert row.company == "Mood Fabrics"
         assert row.category == "Fabric"
-        assert row.schedule_c == "Cost of Goods Sold"
         assert row.net == Decimal("100.00")
         assert row.sales_tax == Decimal("8.88")
         assert row.total == Decimal("108.88")
@@ -718,7 +717,6 @@ class TestToPurchaseRow:
         row = to_purchase_row(extract, match, categories, cfg, datetime(2026, 9, 2))
         assert row.status == "Review"
         assert row.category == ""
-        assert row.schedule_c == ""
 
     def test_ok_when_only_observational_notes_present(self, categories: Categories, cfg: Config) -> None:
         """P1: a purely observational model note (no validate() problem recorded) must not flag the
@@ -772,8 +770,19 @@ class TestToPurchaseRow:
 def test_filename_hint_strips_file_request_uploader_name():
     """Dropbox File Requests may append the uploader's name in parentheses."""
     from datetime import date
-    from kosaccounts.receipts.extract import parse_filename_hint
+    from kosaccounts.expenses.extract import parse_filename_hint
 
     assert parse_filename_hint("2026-09-12 - Mood (Yemi Osunkoya).pdf") == (date(2026, 9, 12), "Mood")
     assert parse_filename_hint("2026-09-12 - Mood receipt (Yemi) (1).jpg") == (date(2026, 9, 12), "Mood")
     assert parse_filename_hint("2026-09-12 - C&C Button Inc.png") == (date(2026, 9, 12), "C&C Button Inc")
+
+
+def test_payment_method_map_from_config_wins():
+    from kosaccounts.expenses.extract import _normalise_payment_method
+
+    methods = ["Mastercard", "Visa", "Discover", "Cash"]
+    m = {"capitalone debit": "Discover", "capitalone": "Discover"}
+    assert _normalise_payment_method("CAPITALONE DEBIT ****1234", methods, m) == "Discover"
+    assert _normalise_payment_method("CapitalOne", methods, m) == "Discover"
+    assert _normalise_payment_method("VISA ****4402", methods, m) == "Visa"
+    assert _normalise_payment_method("VISA ****4402", methods, None) == "Visa"

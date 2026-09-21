@@ -7,7 +7,7 @@ Conventions:
 - Money is Decimal, quantised to 2 dp when written to the workbook.
 - tax_rate is a percentage (Decimal("8.875")), matching the master workbook's "Tax rate" column.
 - Dates are datetime.date; timestamps are timezone-naive local datetime.
-- source_file is the path relative to the imports/ root, e.g. "receipts/2026-09-01 - Mood.pdf".
+- source_file is the path relative to the imports/ root, e.g. "expenses/2026-09-01 - Mood.pdf".
 """
 
 from __future__ import annotations
@@ -18,10 +18,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import ClassVar, Literal, Optional
 
-Stage = Literal["receipt", "bank"]
+Stage = Literal["expense", "bank"]
 """Which pipeline stage a file belongs to; derived from its imports/ subfolder."""
 
-RowStatus = Literal["OK", "Review"]
+RowStatus = Literal["OK", "Review", "Superseded"]
+"""Superseded: replaced by a re-uploaded receipt or by a late-arriving receipt; kept for history."""
 LedgerStatus = Literal["Processed", "Flagged", "Error", "Skipped"]
 MatchMethod = Literal["alias", "exact", "fuzzy", "model", "new"]
 Direction = Literal["debit", "credit"]
@@ -70,8 +71,8 @@ class LedgerEntry:
 
 
 @dataclass
-class ReceiptExtract:
-    """Fields pulled from one receipt (by the model, or by pdfplumber + filename hint)."""
+class ExpenseExtract:
+    """Fields pulled from one expense document (by the model, or by pdfplumber + filename hint)."""
 
     source_file: str
     date: Optional[date] = None
@@ -118,12 +119,12 @@ class BankTxn:
 @dataclass
 class PurchaseRow:
     """One row of the output workbook. Column order is COLUMNS; the Check column is a formula
-    written by workbook.py and is not a field here."""
+    written by workbook.py and is not a field here. Schedule C is deliberately absent: the master
+    workbook derives it from Category."""
 
     date: date
     company: str
     category: str
-    schedule_c: str
     net: Decimal
     sales_tax: Decimal
     total: Decimal
@@ -141,7 +142,6 @@ class PurchaseRow:
         "Date",
         "Company",
         "Category",
-        "Schedule C",
         "Net",
         "Sales Tax",
         "Total",
@@ -159,15 +159,67 @@ class PurchaseRow:
     SHEET_NAME: ClassVar[str] = "Purchases"
 
 
+BankRowStatus = Literal["Matched", "No receipt", "Ignored"]
+
+
+@dataclass
+class BankRow:
+    """One row of the output workbook's "Bank" sheet: every parsed bank transaction and its
+    reconciliation state. Keyed by ref (unique per transaction)."""
+
+    date: date
+    description: str
+    amount: Decimal
+    direction: Direction
+    status: BankRowStatus
+    matched_source: str  # source_file of the purchase row it matched, else ""
+    ref: str
+    statement_file: str
+    statement_start: Optional[date]
+    statement_end: Optional[date]
+    processed_on: datetime
+    sheet_row: Optional[int] = None
+
+    COLUMNS: ClassVar[list[str]] = [
+        "Date",
+        "Description",
+        "Amount",
+        "Direction",
+        "Status",
+        "Matched receipt",
+        "Ref",
+        "Statement file",
+        "Statement start",
+        "Statement end",
+        "Processed on",
+    ]
+    SHEET_NAME: ClassVar[str] = "Bank"
+    TABLE_NAME: ClassVar[str] = "KosibahBank"
+
+    def to_txn(self) -> "BankTxn":
+        return BankTxn(
+            date=self.date,
+            description=self.description,
+            amount=self.amount,
+            direction=self.direction,
+            source_file=self.statement_file,
+            ref=self.ref,
+            statement_start=self.statement_start,
+            statement_end=self.statement_end,
+        )
+
+
 @dataclass
 class ReconcileResult:
     """Output of reconcile.reconcile()."""
 
     new_rows: list[PurchaseRow] = field(default_factory=list)  # bank debits with no receipt
     updated_rows: list[PurchaseRow] = field(default_factory=list)  # existing rows given a bank_ref / note
-    unmatched_receipts: list[PurchaseRow] = field(default_factory=list)  # inside a statement period, no txn
+    superseded_rows: list[PurchaseRow] = field(default_factory=list)  # bank-only rows replaced by a receipt
+    unmatched_expenses: list[PurchaseRow] = field(default_factory=list)  # inside a statement period, no txn
     unmatched_txns: list[BankTxn] = field(default_factory=list)  # debits that became new_rows
     ignored_txns: list[BankTxn] = field(default_factory=list)  # credits / ignore-list hits
+    matched: dict[str, str] = field(default_factory=dict)  # txn.ref -> purchase row source_file
 
 
 @dataclass
@@ -183,10 +235,12 @@ class RunSummary:
     files_errored: dict[str, int] = field(default_factory=dict)
     rows_added: dict[str, int] = field(default_factory=dict)  # stage -> rows appended
     rows_review: int = 0
+    rows_superseded: int = 0  # earlier rows replaced by a re-upload or a late receipt
     new_suppliers: list[str] = field(default_factory=list)
     unmatched_bank_txns: int = 0
-    unmatched_receipts: int = 0
+    unmatched_expenses: int = 0
     errors: list[str] = field(default_factory=list)  # "relative_path: message"
+    warnings: list[str] = field(default_factory=list)  # "relative_path: message" (non-fatal)
 
     @property
     def nothing_to_do(self) -> bool:

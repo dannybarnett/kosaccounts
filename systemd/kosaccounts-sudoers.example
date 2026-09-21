@@ -1,0 +1,27 @@
+# Optional: lets dannybarnett start/stop/restart/check the kosaccounts systemd units without a
+# password, without giving him passwordless sudo generally. Not required to run the pipeline;
+# Danny can always run these with `sudo systemctl ...` and a password.
+#
+# Install with:
+#   sudo visudo -f /etc/sudoers.d/kosaccounts
+# and paste the lines below (do not edit /etc/sudoers directly).
+
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl start kosaccounts_dropbox_pull.service
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl stop kosaccounts_dropbox_pull.service
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl restart kosaccounts_dropbox_pull.service
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl status kosaccounts_dropbox_pull.service
+
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl start kosaccounts_import_watch.service
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl stop kosaccounts_import_watch.service
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl restart kosaccounts_import_watch.service
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl status kosaccounts_import_watch.service
+
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl start kosaccounts_reconcile.service
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl stop kosaccounts_reconcile.service
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl restart kosaccounts_reconcile.service
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl status kosaccounts_reconcile.service
+
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl start kosaccounts_reconcile.timer
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl stop kosaccounts_reconcile.timer
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl restart kosaccounts_reconcile.timer
+dannybarnett ALL=(root) NOPASSWD: /usr/bin/systemctl status kosaccounts_reconcile.timer

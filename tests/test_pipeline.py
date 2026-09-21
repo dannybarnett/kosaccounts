@@ -1,7 +1,7 @@
 """Tests for kosaccounts.pipeline.run_pipeline.
 
 Never calls the real `claude` binary: kosaccounts.pipeline.ClaudeClient is monkeypatched to a fake
-whose run_json() returns canned JSON (for receipts) or raises ClaudeError. The repo's real seeded
+whose run_json() returns canned JSON (for expenses) or raises ClaudeError. The repo's real seeded
 data/*.csv (suppliers, aliases, categories, payment methods) are copied into each tmp_repo so
 supplier matching / category validation behave like production.
 """
@@ -25,7 +25,7 @@ from kosaccounts.config import Config, load_config
 from kosaccounts.ledger import Ledger
 from kosaccounts.models import PurchaseRow
 from kosaccounts.pipeline import run_pipeline
-from kosaccounts.receipts.extract import extract_receipt as real_extract_receipt
+from kosaccounts.expenses.extract import extract_expense as real_extract_expense
 from kosaccounts.workbook import OutputWorkbook
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -55,20 +55,20 @@ def blocking_cfg(tmp_repo: Path) -> Config:
 
 
 def make_fake_claude_client(
-    receipts: Optional[dict] = None,
+    expenses: Optional[dict] = None,
     raise_for=frozenset(),
     category_reply: Optional[dict] = None,
 ):
     """Returns a class to monkeypatch kosaccounts.pipeline.ClaudeClient with. Never shells out to the
     real `claude` binary.
 
-    - `receipts` maps a receipt file's stem (unchanged by the image-conversion step) -> canned JSON.
+    - `expenses` maps an expense file's stem (unchanged by the image-conversion step) -> canned JSON.
     - `raise_for` is a set of stems whose run_json() call raises ClaudeError.
     - Calls with no `files` are supplier adjudication (tier 4) or new-supplier category suggestion:
       the latter gets `category_reply` (default: no suggestion); the former always answers "no match"
       so grey-zone supplier names fall through to "new" deterministically.
     """
-    receipts = receipts or {}
+    expenses = expenses or {}
     raise_for = set(raise_for)
 
     class _FakeClaudeClient:
@@ -87,8 +87,8 @@ def make_fake_claude_client(
                 stem = Path(files[0]).stem
                 if stem in raise_for:
                     raise ClaudeError(f"boom: {stem}")
-                if stem in receipts:
-                    return receipts[stem]
+                if stem in expenses:
+                    return expenses[stem]
                 raise ClaudeError(f"no canned response configured for {stem}")
             if "Choose the single best-fitting expense category" in prompt:
                 return category_reply if category_reply is not None else {"category": None}
@@ -102,7 +102,7 @@ def make_png(path: Path, size=(40, 30)) -> None:
     Image.new("RGB", size, color=(120, 140, 160)).save(path)
 
 
-def canned_receipt(**overrides) -> dict:
+def canned_expense(**overrides) -> dict:
     data = dict(
         date="2026-09-01",
         supplier_name="Pacific Trimming",
@@ -143,20 +143,20 @@ class TestNothingToDo:
 
 
 # ---------------------------------------------------------------------------
-# 2. Two receipts: known supplier reconciles -> OK, new low-confidence supplier -> Review
+# 2. Two expenses: known supplier reconciles -> OK, new low-confidence supplier -> Review
 # ---------------------------------------------------------------------------
 
 
-class TestReceiptsHappyPath:
-    def test_two_receipts(self, cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
-        good_path = cfg.paths.imports / "receipts" / "2026-09-01 - Pacific Trimming.png"
-        new_path = cfg.paths.imports / "receipts" / "2026-09-02 - Zzyzx Quantum Vendor Corp.png"
+class TestExpensesHappyPath:
+    def test_two_expenses(self, cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+        good_path = cfg.paths.imports / "expenses" / "2026-09-01 - Pacific Trimming.png"
+        new_path = cfg.paths.imports / "expenses" / "2026-09-02 - Zzyzx Quantum Vendor Corp.png"
         make_png(good_path)
         make_png(new_path)
 
-        receipts = {
-            good_path.stem: canned_receipt(),
-            new_path.stem: canned_receipt(
+        expenses = {
+            good_path.stem: canned_expense(),
+            new_path.stem: canned_expense(
                 date="2026-09-02",
                 supplier_name="Zzyzx Quantum Vendor Corp",
                 total=42.0,
@@ -167,14 +167,14 @@ class TestReceiptsHappyPath:
                 line_summary="Mystery purchase",
             ),
         }
-        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(receipts=receipts))
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses))
 
         summary = run_pipeline(cfg)
 
         assert not summary.nothing_to_do
         assert summary.errors == []
-        assert summary.files_new["receipt"] == 2
-        assert summary.rows_added["receipt"] == 2
+        assert summary.files_new["expense"] == 2
+        assert summary.rows_added["expense"] == 2
         assert summary.rows_review == 1
         assert summary.new_suppliers == ["Zzyzx Quantum Vendor Corp"]
 
@@ -187,9 +187,9 @@ class TestReceiptsHappyPath:
 
         ledger = Ledger(cfg.paths.ledger)
         entries = {e.relative_path: e for e in ledger.entries()}
-        assert entries["receipts/2026-09-01 - Pacific Trimming.png"].status == "Processed"
-        assert entries["receipts/2026-09-01 - Pacific Trimming.png"].rows_added == 1
-        assert entries["receipts/2026-09-02 - Zzyzx Quantum Vendor Corp.png"].status == "Flagged"
+        assert entries["expenses/2026-09-01 - Pacific Trimming.png"].status == "Processed"
+        assert entries["expenses/2026-09-01 - Pacific Trimming.png"].rows_added == 1
+        assert entries["expenses/2026-09-02 - Zzyzx Quantum Vendor Corp.png"].status == "Flagged"
 
         pending_rows = list(csv.DictReader(cfg.paths.pending_suppliers.open()))
         assert any(row["Supplier"] == "Zzyzx Quantum Vendor Corp" for row in pending_rows)
@@ -198,13 +198,13 @@ class TestReceiptsHappyPath:
         #
         # Known bug in kosaccounts/discovery.py (not fixed here; out of scope for this task):
         # discover()'s hidden-file filter only checks `file_path.name.startswith(".")`, not any
-        # parent directory component. receipts/extract.py's `_convert_image_for_model` caches
-        # converted JPEGs under a sibling "imports/receipts/.converted/" directory; those cached
+        # parent directory component. expenses/extract.py's `_convert_image_for_model` caches
+        # converted JPEGs under a sibling "imports/expenses/.converted/" directory; those cached
         # *.jpg files don't themselves start with "." so rglob("*") surfaces them as brand-new
-        # "receipt" files on the very next scan, even though the two original receipts are
+        # "expense" files on the very next scan, even though the two original expenses are
         # unchanged. Work around it here by clearing the cache dir before re-running, which is
         # what this assertion is actually testing: the two *original* files are not reprocessed.
-        shutil.rmtree(cfg.paths.imports / "receipts" / ".converted", ignore_errors=True)
+        shutil.rmtree(cfg.paths.imports / "expenses" / ".converted", ignore_errors=True)
 
         summary2 = run_pipeline(cfg)
         assert summary2.nothing_to_do
@@ -217,17 +217,17 @@ class TestReceiptsHappyPath:
 
 class TestDryRun:
     def test_dry_run_writes_nothing(self, cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
-        good_path = cfg.paths.imports / "receipts" / "2026-09-01 - Pacific Trimming.png"
+        good_path = cfg.paths.imports / "expenses" / "2026-09-01 - Pacific Trimming.png"
         make_png(good_path)
-        receipts = {good_path.stem: canned_receipt()}
-        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(receipts=receipts))
+        expenses = {good_path.stem: canned_expense()}
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses))
 
         summary = run_pipeline(cfg, dry_run=True)
 
         assert not summary.nothing_to_do
         assert summary.dry_run is True
         assert summary.errors == []
-        assert summary.rows_added["receipt"] == 1
+        assert summary.rows_added["expense"] == 1
 
         assert not cfg.paths.output_workbook.exists()
         assert not cfg.paths.ledger.exists()
@@ -246,9 +246,9 @@ class TestPerFileErrorHandling:
     def test_claude_error_unsupported_type_and_extraction_crash(
         self, cfg: Config, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        err_path = cfg.paths.imports / "receipts" / "2026-09-01 - ClaudeErr.png"
-        unsupported_path = cfg.paths.imports / "receipts" / "2026-09-02 - Unsupported.txt"
-        boom_path = cfg.paths.imports / "receipts" / "2026-09-03 - Boom.png"
+        err_path = cfg.paths.imports / "expenses" / "2026-09-01 - ClaudeErr.png"
+        unsupported_path = cfg.paths.imports / "expenses" / "2026-09-02 - Unsupported.txt"
+        boom_path = cfg.paths.imports / "expenses" / "2026-09-03 - Boom.png"
 
         make_png(err_path)
         unsupported_path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,27 +259,27 @@ class TestPerFileErrorHandling:
             pipeline_mod, "ClaudeClient", make_fake_claude_client(raise_for={err_path.stem})
         )
 
-        def flaky_extract_receipt(file, client, cfg_, payment_methods):
+        def flaky_extract_expense(file, client, cfg_, payment_methods):
             if "Boom" in file.relative_path:
                 raise RuntimeError("simulated extraction crash")
-            return real_extract_receipt(file, client, cfg_, payment_methods)
+            return real_extract_expense(file, client, cfg_, payment_methods)
 
-        monkeypatch.setattr(pipeline_mod, "extract_receipt", flaky_extract_receipt)
+        monkeypatch.setattr(pipeline_mod, "extract_expense", flaky_extract_expense)
 
         summary = run_pipeline(cfg)
 
-        assert summary.files_new["receipt"] == 3
-        assert summary.files_errored["receipt"] == 1
+        assert summary.files_new["expense"] == 3
+        assert summary.files_errored["expense"] == 1
         assert len(summary.errors) == 1
-        assert "receipts/2026-09-03 - Boom.png" in summary.errors[0]
+        assert "expenses/2026-09-03 - Boom.png" in summary.errors[0]
         assert "RuntimeError" in summary.errors[0] or "simulated extraction crash" in summary.errors[0]
 
         ledger = Ledger(cfg.paths.ledger)
         entries = {e.relative_path: e for e in ledger.entries()}
-        assert entries["receipts/2026-09-01 - ClaudeErr.png"].status == "Flagged"
-        assert entries["receipts/2026-09-02 - Unsupported.txt"].status == "Flagged"
-        assert entries["receipts/2026-09-03 - Boom.png"].status == "Error"
-        assert "RuntimeError" in entries["receipts/2026-09-03 - Boom.png"].notes
+        assert entries["expenses/2026-09-01 - ClaudeErr.png"].status == "Flagged"
+        assert entries["expenses/2026-09-02 - Unsupported.txt"].status == "Flagged"
+        assert entries["expenses/2026-09-03 - Boom.png"].status == "Error"
+        assert "RuntimeError" in entries["expenses/2026-09-03 - Boom.png"].notes
 
         # The other two files were still processed despite the crash.
         wb = OutputWorkbook(cfg.paths.output_workbook)
@@ -307,7 +307,6 @@ class TestBankStage:
             date=date(2026, 8, 2),
             company="Pacific Trimming",
             category="Haberdashery",
-            schedule_c="Cost of Goods Sold",
             net=Decimal("19.50"),
             sales_tax=Decimal("0.00"),
             total=Decimal("19.50"),
@@ -315,7 +314,7 @@ class TestBankStage:
             payment_method="",
             notes="",
             year=2026,
-            source_file="receipts/2026-08-02 - Pacific Trimming.pdf",
+            source_file="expenses/2026-08-02 - Pacific Trimming.pdf",
             processed_on=datetime(2026, 8, 2, 9, 0, 0),
             status="OK",
         )
@@ -360,7 +359,7 @@ class TestBankStage:
 # ---------------------------------------------------------------------------
 
 
-class TestDuplicateReceipts:
+class TestDuplicateExpenses:
     """P6: Dropbox File Requests can end up with the same receipt uploaded twice under two
     filenames; the pipeline should flag the second occurrence rather than silently doubling the
     purchase."""
@@ -368,16 +367,16 @@ class TestDuplicateReceipts:
     def test_duplicate_within_same_batch_flags_second_occurrence(
         self, cfg: Config, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        first_path = cfg.paths.imports / "receipts" / "2026-09-01 - Pacific Trimming.png"
-        second_path = cfg.paths.imports / "receipts" / "2026-09-01 - Pacific Trimming (1).png"
+        first_path = cfg.paths.imports / "expenses" / "2026-09-01 - Pacific Trimming.png"
+        second_path = cfg.paths.imports / "expenses" / "2026-09-01 - Pacific Trimming (1).png"
         make_png(first_path)
         make_png(second_path)
 
-        receipts = {
-            first_path.stem: canned_receipt(),
-            second_path.stem: canned_receipt(),
+        expenses = {
+            first_path.stem: canned_expense(),
+            second_path.stem: canned_expense(),
         }
-        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(receipts=receipts))
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses))
 
         summary = run_pipeline(cfg)
 
@@ -405,7 +404,6 @@ class TestDuplicateReceipts:
             date=date(2026, 9, 1),
             company="Pacific Trimming",
             category="Haberdashery",
-            schedule_c="Cost of Goods Sold",
             net=Decimal("19.50"),
             sales_tax=Decimal("0.00"),
             total=Decimal("19.50"),
@@ -413,7 +411,7 @@ class TestDuplicateReceipts:
             payment_method="",
             notes="",
             year=2026,
-            source_file="receipts/2026-08-01 - Pacific Trimming Old.pdf",
+            source_file="expenses/2026-08-01 - Pacific Trimming Old.pdf",
             processed_on=datetime(2026, 8, 1, 9, 0, 0),
             status="OK",
         )
@@ -421,32 +419,32 @@ class TestDuplicateReceipts:
         wb.append([existing_row])
         wb.save()
 
-        new_path = cfg.paths.imports / "receipts" / "2026-09-01 - Pacific Trimming.png"
+        new_path = cfg.paths.imports / "expenses" / "2026-09-01 - Pacific Trimming.png"
         make_png(new_path)
-        receipts = {new_path.stem: canned_receipt()}  # date 2026-09-01, total 19.5, Pacific Trimming
-        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(receipts=receipts))
+        expenses = {new_path.stem: canned_expense()}  # date 2026-09-01, total 19.5, Pacific Trimming
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses))
 
         run_pipeline(cfg)
 
         wb2 = OutputWorkbook(cfg.paths.output_workbook)
         rows = wb2.rows()
-        new_row = next(r for r in rows if r.source_file == "receipts/2026-09-01 - Pacific Trimming.png")
+        new_row = next(r for r in rows if r.source_file == "expenses/2026-09-01 - Pacific Trimming.png")
         assert new_row.status == "Review"
-        assert "Possible duplicate of receipts/2026-08-01 - Pacific Trimming Old.pdf" in new_row.notes
+        assert "Possible duplicate of expenses/2026-08-01 - Pacific Trimming Old.pdf" in new_row.notes
 
         ledger = Ledger(cfg.paths.ledger)
         entries = {e.relative_path: e for e in ledger.entries()}
-        assert entries["receipts/2026-09-01 - Pacific Trimming.png"].status == "Flagged"
+        assert entries["expenses/2026-09-01 - Pacific Trimming.png"].status == "Flagged"
 
 
 class TestBlockOnFlags:
     def test_block_on_flags_prevents_write(
         self, blocking_cfg: Config, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        new_path = blocking_cfg.paths.imports / "receipts" / "2026-09-01 - Zzyzx Quantum Vendor Corp.png"
+        new_path = blocking_cfg.paths.imports / "expenses" / "2026-09-01 - Zzyzx Quantum Vendor Corp.png"
         make_png(new_path)
-        receipts = {
-            new_path.stem: canned_receipt(
+        expenses = {
+            new_path.stem: canned_expense(
                 supplier_name="Zzyzx Quantum Vendor Corp",
                 confidence=0.3,
                 total=10.0,
@@ -455,10 +453,237 @@ class TestBlockOnFlags:
                 tax_rate=0,
             )
         }
-        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(receipts=receipts))
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses))
 
         summary = run_pipeline(blocking_cfg)
 
         assert any("blocked" in e for e in summary.errors)
         assert not blocking_cfg.paths.output_workbook.exists()
         assert not blocking_cfg.paths.ledger.exists()
+
+
+# ---------------------------------------------------------------------------
+# 7. Reconciliation across runs (R4) and re-uploaded expenses (R5)
+# ---------------------------------------------------------------------------
+
+_BANK_CSV_HEADER = "Transaction Date,Posted Date,Card No.,Description,Category,Debit,Credit\n"
+
+
+def write_bank_csv(path: Path, rows: list[tuple[str, str, str]]) -> None:
+    """rows: (date "YYYY-MM-DD", description, debit amount as text)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [_BANK_CSV_HEADER]
+    for txn_date, description, amount in rows:
+        lines.append(f"{txn_date},{txn_date},XXXX1234,{description},Shopping,{amount},\n")
+    path.write_text("".join(lines))
+
+
+class TestReconciliationAcrossRuns:
+    """R4: the Bank sheet is the source of truth, so a late receipt can claim an old unmatched
+    debit even on an expenses-only run with no new bank file."""
+
+    def test_late_receipt_claims_old_bank_only_row(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bank_path = cfg.paths.imports / "bank" / "statement_sep.csv"
+        write_bank_csv(bank_path, [("2026-09-05", "WEIRD VENDOR LLC", "12.00")])
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client())
+
+        summary1 = run_pipeline(cfg, stages=["bank"])
+        assert summary1.errors == []
+        assert summary1.rows_added["bank"] == 1
+
+        wb1 = OutputWorkbook(cfg.paths.output_workbook)
+        bank_only_rows = wb1.rows()
+        assert len(bank_only_rows) == 1
+        bank_only_row = bank_only_rows[0]
+        assert bank_only_row.status == "Review"
+        assert bank_only_row.bank_ref != ""
+
+        bank_sheet_rows = wb1.bank_rows()
+        assert len(bank_sheet_rows) == 1
+        assert bank_sheet_rows[0].status == "No receipt"
+        old_ref = bank_sheet_rows[0].ref
+
+        # Run 2: a receipt for that same purchase arrives late -- no new bank file this time.
+        expense_path = cfg.paths.imports / "expenses" / "2026-09-06 - Weird Vendor.png"
+        make_png(expense_path)
+        expenses = {
+            expense_path.stem: canned_expense(
+                date="2026-09-06",
+                supplier_name="Weird Vendor LLC",
+                total=12.0,
+                net=12.0,
+                sales_tax=0,
+                tax_rate=0,
+            )
+        }
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses))
+
+        summary2 = run_pipeline(cfg, stages=["expense"])
+        assert summary2.errors == []
+        assert summary2.rows_superseded == 1
+
+        wb2 = OutputWorkbook(cfg.paths.output_workbook)
+        rows2 = wb2.rows()
+        assert len(rows2) == 2
+
+        expense_row = next(r for r in rows2 if r.source_file == "expenses/2026-09-06 - Weird Vendor.png")
+        assert expense_row.bank_ref == old_ref
+
+        superseded = next(r for r in rows2 if r.source_file == "bank/statement_sep.csv")
+        assert superseded.status == "Superseded"
+        assert f"Receipt arrived: {expense_row.source_file}" in superseded.notes
+
+        bank_sheet_rows2 = wb2.bank_rows()
+        assert len(bank_sheet_rows2) == 1
+        assert bank_sheet_rows2[0].status == "Matched"
+        assert bank_sheet_rows2[0].matched_source == expense_row.source_file
+
+
+class TestReuploadedExpenses:
+    """R5: re-uploading a corrected receipt under the same filename supersedes the old row and
+    releases any bank ref it held; an identical re-upload (same hash) is a no-op."""
+
+    def test_reupload_with_new_content_supersedes_and_releases_bank_ref(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bank_path = cfg.paths.imports / "bank" / "statement_sep.csv"
+        write_bank_csv(bank_path, [("2026-09-01", "VENDOR A INC PAYMENT", "50.00")])
+
+        expense_path = cfg.paths.imports / "expenses" / "2026-09-01 - Vendor A.png"
+        make_png(expense_path, size=(40, 30))
+        expenses = {
+            expense_path.stem: canned_expense(
+                date="2026-09-01",
+                supplier_name="Vendor A Inc",
+                total=50.0,
+                net=50.0,
+                sales_tax=0,
+                tax_rate=0,
+            )
+        }
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses))
+
+        summary1 = run_pipeline(cfg)
+        assert summary1.errors == []
+        assert summary1.rows_superseded == 0
+
+        wb1 = OutputWorkbook(cfg.paths.output_workbook)
+        rows1 = wb1.rows()
+        assert len(rows1) == 1
+        original_row = rows1[0]
+        assert original_row.bank_ref != ""
+        original_ref = original_row.bank_ref
+        original_sheet_row = original_row.sheet_row
+
+        bank_rows1 = wb1.bank_rows()
+        assert len(bank_rows1) == 1
+        assert bank_rows1[0].status == "Matched"
+
+        # Re-upload the same filename with corrected (different) content.
+        make_png(expense_path, size=(41, 31))
+        expenses2 = {
+            expense_path.stem: canned_expense(
+                date="2026-09-01",
+                supplier_name="Vendor A Incorporated",
+                total=50.0,
+                net=50.0,
+                sales_tax=0,
+                tax_rate=0,
+            )
+        }
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses2))
+
+        summary2 = run_pipeline(cfg)
+        assert summary2.errors == []
+        assert summary2.rows_superseded == 1
+
+        wb2 = OutputWorkbook(cfg.paths.output_workbook)
+        rows2 = wb2.rows()
+        assert len(rows2) == 2
+
+        superseded = next(r for r in rows2 if r.sheet_row == original_sheet_row)
+        assert superseded.status == "Superseded"
+        assert superseded.bank_ref == ""
+        assert "Superseded by re-upload on" in superseded.notes
+
+        new_row = next(r for r in rows2 if r.sheet_row != original_sheet_row)
+        assert new_row.company == "Vendor A Incorporated"
+        assert new_row.bank_ref == original_ref  # re-claimed the same bank txn
+
+        bank_rows2 = wb2.bank_rows()
+        assert len(bank_rows2) == 1
+        assert bank_rows2[0].ref == original_ref
+        assert bank_rows2[0].status == "Matched"
+        assert bank_rows2[0].matched_source == new_row.source_file
+
+        # Re-uploading byte-identical content (same hash) is a no-op.
+        make_png(expense_path, size=(41, 31))
+        summary3 = run_pipeline(cfg)
+        assert summary3.nothing_to_do
+
+    def test_collision_named_reupload_supersedes_earlier_row(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Dropbox listener saves a same-name/different-content re-upload under a collision
+        name ("stem__<hash8>.ext") rather than overwriting the original file. The pipeline must
+        still treat "expenses/X__deadbeef.pdf" as a re-upload of "expenses/X.pdf" and supersede
+        the earlier row, via discovery.canonical_relative_path / ledger.entries_for_canonical_path."""
+        original_path = cfg.paths.imports / "expenses" / "2026-09-01 - Vendor A.png"
+        make_png(original_path, size=(40, 30))
+        expenses = {
+            original_path.stem: canned_expense(
+                date="2026-09-01",
+                supplier_name="Vendor A Inc",
+                total=50.0,
+                net=50.0,
+                sales_tax=0,
+                tax_rate=0,
+            )
+        }
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses))
+
+        summary1 = run_pipeline(cfg)
+        assert summary1.errors == []
+        assert summary1.rows_superseded == 0
+
+        wb1 = OutputWorkbook(cfg.paths.output_workbook)
+        rows1 = wb1.rows()
+        assert len(rows1) == 1
+        original_row = rows1[0]
+        original_sheet_row = original_row.sheet_row
+
+        # The listener downloads a corrected re-upload under a collision name (different content
+        # -> different hash), leaving the original file in place on disk.
+        collision_path = cfg.paths.imports / "expenses" / "2026-09-01 - Vendor A__a1b2c3d4.png"
+        make_png(collision_path, size=(41, 31))
+        expenses2 = {
+            collision_path.stem: canned_expense(
+                date="2026-09-01",
+                supplier_name="Vendor A Incorporated",
+                total=50.0,
+                net=50.0,
+                sales_tax=0,
+                tax_rate=0,
+            )
+        }
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses2))
+
+        summary2 = run_pipeline(cfg)
+        assert summary2.errors == []
+        assert summary2.rows_superseded == 1
+
+        wb2 = OutputWorkbook(cfg.paths.output_workbook)
+        rows2 = wb2.rows()
+        assert len(rows2) == 2
+
+        superseded = next(r for r in rows2 if r.sheet_row == original_sheet_row)
+        assert superseded.status == "Superseded"
+        assert superseded.source_file == "expenses/2026-09-01 - Vendor A.png"
+        assert "Superseded by re-upload on" in superseded.notes
+
+        new_row = next(r for r in rows2 if r.sheet_row != original_sheet_row)
+        assert new_row.company == "Vendor A Incorporated"
+        assert new_row.source_file == "expenses/2026-09-01 - Vendor A__a1b2c3d4.png"
+

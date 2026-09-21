@@ -1,0 +1,25 @@
+[Unit]
+Description=Kosaccounts import watcher (Stage 3: inotify on imports/, triggers processing)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/storage/docs/kosaccounts
+
+[Service]
+Type=simple
+User=dannybarnett
+Group=dannybarnett
+WorkingDirectory=/home/dannybarnett/claude-coding/kosaccounts
+Environment=HOME=/home/dannybarnett
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/dannybarnett/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/dannybarnett/claude-coding/kosaccounts/.venv/bin/python -m kosaccounts intake watch
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

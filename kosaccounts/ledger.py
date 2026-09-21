@@ -54,6 +54,19 @@ class Ledger:
     def has_hash(self, sha256: str) -> bool:
         return sha256 in self._hashes
 
+    def entries_for_path(self, relative_path: str) -> list[LedgerEntry]:
+        """All ledger entries recorded for `relative_path`, in the order they were appended."""
+        return [e for e in self._entries if e.relative_path == relative_path]
+
+    def entries_for_canonical_path(self, relative_path: str) -> list[LedgerEntry]:
+        """All ledger entries whose relative_path canonicalises (discovery.canonical_relative_path)
+        to the same value as `relative_path`, in append order. Matches a Dropbox collision re-upload
+        ("stem__<hash8>.ext") against the entry recorded for the original "stem.ext", and vice versa."""
+        from kosaccounts.discovery import canonical_relative_path  # deferred: avoids a module cycle
+
+        target = canonical_relative_path(relative_path)
+        return [e for e in self._entries if canonical_relative_path(e.relative_path) == target]
+
     def append(self, entry: LedgerEntry) -> None:
         """Append entry to ledger and write to CSV immediately."""
         # Write header if file is new

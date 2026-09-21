@@ -82,6 +82,9 @@ def format_summary(summary: RunSummary) -> str:
     # Review rows
     lines.append(f"Review rows:     {summary.rows_review}")
 
+    # Superseded rows
+    lines.append(f"Superseded rows: {summary.rows_superseded}")
+
     # New suppliers
     if summary.new_suppliers:
         suppliers_str = ", ".join(summary.new_suppliers)
@@ -91,7 +94,13 @@ def format_summary(summary: RunSummary) -> str:
 
     # Unmatched transactions
     lines.append(f"Unmatched bank:  {summary.unmatched_bank_txns}")
-    lines.append(f"Unmatched receipt: {summary.unmatched_receipts}")
+    lines.append(f"Unmatched expense: {summary.unmatched_expenses}")
+
+    # Warnings (non-fatal per-file problems)
+    if summary.warnings:
+        lines.append("Warnings:")
+        for warning in summary.warnings:
+            lines.append(f"  {warning}")
 
     # Errors
     if summary.errors:

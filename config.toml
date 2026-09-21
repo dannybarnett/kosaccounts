@@ -11,9 +11,9 @@ master_workbook = "specs/Kosibah LLC purchases and receipts.xlsx"
 # false: flagged rows get Status=Review and the run continues (headless default).
 # true: a run with any flagged item stops before writing the workbook.
 block_on_flags = false
-stages = ["receipt", "bank"]
+stages = ["expense", "bank"]
 
-[receipts]
+[expenses]
 min_confidence = 0.75      # below this the row is marked Review
 max_image_px = 2000        # longest side after conversion for the model's Read tool
 default_currency = "USD"
@@ -21,6 +21,9 @@ amount_tolerance = "0.01"  # net + tax must equal total within this
 # Text removed from the filename before it is used as a supplier hint (Dropbox File Requests
 # append the uploader's name: "2026-06-12 Guide Fabrics INC Yemi Osunkoya.pdf"). Case-insensitive.
 filename_strip = ["Yemi Osunkoya", "Danny Barnett", "D Barnett"]
+# Payment-method text as printed on receipts (lower-cased substring) -> name used in the master.
+# Checked before the generic Visa/Mastercard/... matching. The Capital One debit card is a Discover.
+payment_method_map = { "capitalone debit" = "Discover", "capital one debit" = "Discover", "capitalone" = "Discover" }
 
 [suppliers]
 auto_match_threshold = 92   # rapidfuzz token_set_ratio >= this: accept without the model
@@ -28,6 +31,9 @@ model_review_threshold = 70 # between this and auto: ask the model to adjudicate
 
 [bank]
 match_window_days = 5
+# Payment method written on rows that come only from a bank statement, and filled in on matched
+# receipts that had no payment hint. The Capital One checking account's debit card is a Discover.
+statement_payment_method = "Discover"
 # bank descriptions (case-insensitive substrings) that are never purchases: card payments,
 # transfers between Danny's own accounts, interest.
 ignore_descriptions = [
@@ -42,3 +48,18 @@ timeout_seconds = 120
 max_turns = 4
 retries = 1
 allowed_tools = ["Read"]
+
+[intake]
+# Event-driven intake (specs/README_server_intake.md). kos_root is the DATA root only: it holds
+# imports/{expenses,bank}, .staging/ and state/. Code, data/, output/ and logs/ stay in the repo.
+kos_root = "/mnt/storage/docs/kosaccounts"
+folders = ["expenses", "bank"]               # Dropbox /<folder> -> kos_root/imports/<folder>
+longpoll_timeout_seconds = 480
+settle_poll_seconds = 60                     # re-snapshot a changed Dropbox folder this often
+settle_stable_polls = 2                      # identical consecutive snapshots before downloading
+settle_max_wait_minutes = 60                 # give up for this cycle after this long
+inotify_quiet_seconds = 120                  # watcher: seconds without events before processing
+reconcile_interval_minutes = 60              # listener also runs a full reconcile this often
+# Command run by the import watcher once a folder is quiet; the absolute imports/<folder> path is
+# appended as the last argument. Relative commands are resolved against this file's directory.
+process_commands = { expenses = "scripts/run_pipeline.sh --stage expense", bank = "scripts/run_pipeline.sh --stage bank" }

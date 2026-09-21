@@ -1,126 +1,120 @@
 # Dropbox setup for the kosaccounts pipeline
 
-Goal: files dropped into Dropbox by Danny or his husband are copied to `imports/` on the server
-every hour, and a compromise of the server can never reach anything outside one Dropbox folder.
+Goal: expense documents and bank statements dropped into two shared Dropbox folders are copied,
+on a Mac, into the `kosaccounts` app folder; the server watches that app folder through the
+Dropbox API, pulls new files down, and triggers processing. A compromise of the server can never
+reach anything outside one Dropbox folder, and the server's token is read-only.
 
-Design:
+## What the app is
 
 - The Dropbox app **kosaccounts** is a *Scoped access, App folder* app. Its token can only see
   `/Apps/kosaccounts/` in Danny's Dropbox, nothing else.
-- Danny adds files directly to `/Apps/kosaccounts/{bank,receipts,invoices}`.
-- Anyone else uploads through Dropbox **File Requests** (permanent links pointing at those
-  subfolders). Uploaders need no access to the folder and never see its contents.
-- `rclone copy` on the server is one-way: it never deletes or changes anything in Dropbox.
+- It holds two subfolders, `expenses` and `bank`, matching `KOS_ROOT/imports/expenses` and
+  `KOS_ROOT/imports/bank` on the server.
+- The server's access is **read only**: `files.metadata.read` and `files.content.read`. It never
+  writes to, moves, or deletes anything in Dropbox.
 
-## 1. Dropbox app (https://www.dropbox.com/developers/apps)
+This replaces the old rclone + File Requests setup, which needed write scopes and ran from an
+hourly cron job. See "Legacy" at the bottom.
 
-1. Create app → **Scoped access** → **App folder** → name **kosaccounts**.
-   Dropbox creates `/Apps/kosaccounts/` on first use.
-2. **Permissions** tab, tick and Submit (do this *before* authorising; scopes are baked into the
-   token):
-   - `account_info.read`
-   - `files.metadata.read`
-   - `files.metadata.write`
-   - `files.content.read`
-   - `files.content.write`
+## 1. Permissions tab changes (do this before authorising)
 
-   rclone requires the write scopes to authorise at all, even though this pipeline only reads.
-   With an App-folder app they apply only inside `/Apps/kosaccounts/`.
-3. **Settings** tab: OAuth 2 Redirect URIs → add `http://localhost:53682/`.
-   Leave the app in Development status (fine for personal use, never needs review).
-   The console's "Generate access token" button is not needed by rclone (it obtains its own
-   long-lived refresh token in step 3). It is harmless to press it once to make Dropbox create
-   `/Apps/kosaccounts/` so you can add the subfolders; the token expires after about four hours
-   and should never be copied to the server.
-4. Note the **App key** and **App secret**.
+In the Dropbox App Console (https://www.dropbox.com/developers/apps) for the **kosaccounts**
+app, open the **Permissions** tab:
 
-## 2. Folders and File Requests (Dropbox web)
+- Tick `files.metadata.read`
+- Tick `files.content.read`
+- Untick any write scopes left over from rclone (`files.metadata.write`,
+  `files.content.write`) — the new listener never needs them
+- Click **Submit**
 
-1. In `/Apps/kosaccounts/` create `bank`, `receipts`, `invoices`.
-2. Create a File Request for each folder (Dropbox → File requests → New request → choose the
-   folder → "no deadline"). Share the receipts and bank links with anyone who uploads.
+Scopes are baked into the token at the moment it is issued, so do this before running
+`auth-setup` below. If the scopes change later, re-run `auth-setup` to get a token with the new
+scopes.
 
-Notes on File Request uploads:
+## 2. Authorise
 
-- Uploads land directly in the chosen folder and are picked up on the next hourly import.
-- Dropbox may add the uploader's name in parentheses to a filename, e.g.
-  `2026-09-12 - Mood (Yemi).pdf`. The pipeline ignores a trailing parenthesised group when it
-  reads the date and supplier hint from the name, and it identifies files by content hash, so
-  renames never cause duplicates.
-- Keep the `YYYY-MM-DD - Supplier` naming convention where possible; it helps the receipt reader
-  but is not required.
-
-## 3. Authorise on a MacBook (the server has no browser)
+Run the one-time helper on the server (it never writes anything to disk and never logs the
+values it handles):
 
 ```bash
-brew install rclone
-rclone authorize "dropbox" "<app_key>" "<app_secret>"
+.venv/bin/python -m kosaccounts intake auth-setup
 ```
 
-Approve the app in the browser that opens (it asks for access to the kosaccounts app folder
-only). rclone prints a JSON token block (`{"access_token": ..., "refresh_token": ...,
-"expiry": ...}`). Copy the whole block including the braces.
+It asks for the app key and secret (from the App Console's **Settings** tab; the secret is typed
+without echoing), then prints an authorization URL. Paste that URL into any browser — the Mac is
+fine, the server doesn't need one — approve the app, and paste the code it shows back into the
+prompt. The tool then prints a refresh token **once**. Copy it immediately; it is not shown
+again and not stored anywhere by this tool.
 
-## 4. Configure rclone on the server
+## 3. Install the secrets file
+
+The app key, app secret, and refresh token live only in `/etc/kosaccounts.env` (owner root, mode
+600), loaded by systemd via `EnvironmentFile=`. They must never appear in a script, in this
+repository, or in logs — `.gitignore` covers `*.env` and `kosaccounts.env` in case a copy ever
+lands in a working tree by accident, but the real protection is that the file only ever exists
+under `/etc`.
 
 ```bash
-sudo apt install rclone      # once
-rclone config
+sudo install -o root -g root -m 600 systemd/kosaccounts.env.example /etc/kosaccounts.env
+sudo $EDITOR /etc/kosaccounts.env
 ```
 
-| Prompt | Answer |
-|---|---|
-| n) New remote | `n` |
-| name | `kosaccounts` |
-| Storage | `dropbox` |
-| client_id | your App key |
-| client_secret | your App secret |
-| Edit advanced config? | `n` |
-| Use auto config? ("Say Y if not sure / N if headless") | `n` (the server has no browser) |
-| config_token | paste the JSON block from step 3 (rclone repeats the `rclone authorize` command to run on the MacBook just above this prompt) |
-| Keep this remote? | `y` |
+Fill in the three variables the file already lists (`DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`,
+`DROPBOX_REFRESH_TOKEN`) with the values `auth-setup` printed in step 2, one `NAME=value` line
+each, no quotes, no spaces around the `=`. Save and exit; the file must stay mode 600, owner
+root.
 
-The token is stored in `~/.config/rclone/rclone.conf` (owner-only permissions, keep it that way).
-Even if it leaked, it can only reach `/Apps/kosaccounts/`.
+## 4. Install and start the services
+
+```bash
+scripts/install_systemd.sh            # prints the sudo commands (default; nothing is run)
+scripts/install_systemd.sh --apply    # or runs them directly, prompting for sudo as needed
+```
+
+This creates the data directories under `KOS_ROOT`, installs the env file (if not already
+present), installs the three systemd units, reloads systemd, and enables/starts
+`kosaccounts_dropbox_pull.service`, `kosaccounts_import_watch.service`, and
+`kosaccounts_reconcile.timer`. See `docs/ACCEPTANCE.md` for the full acceptance checklist.
 
 ## 5. Verify
 
 ```bash
-rclone lsd kosaccounts:
+sudo systemctl status kosaccounts_dropbox_pull.service
+sudo systemctl status kosaccounts_import_watch.service
+systemctl list-timers 'kosaccounts*'
+
+journalctl -u kosaccounts_dropbox_pull -f
+journalctl -u kosaccounts_import_watch -f
 ```
 
-should list `bank`, `invoices`, `receipts` (the app folder is the remote root). Then run the
-first import by hand and check:
-
-```bash
-scripts/rclone_import.sh
-tail logs/rclone-$(date +%Y-%m-%d).log
-ls -R imports/
-```
-
-## 6. Install the hourly schedule
-
-```bash
-crontab -l                                   # check nothing else is scheduled first
-crontab /home/dannybarnett/claude-coding/kosaccounts/scripts/crontab.txt
-```
-
-rclone runs at :00, the pipeline at :15.
+Expect, in order, on first start: a startup reconciliation pass (folder listing, "batch"
+summary lines even if the batch is empty), then long-poll waits. When files land in Dropbox,
+expect a settle delay (`settle_poll_seconds` x `settle_stable_polls`, default ~2 minutes) before
+they appear in `KOS_ROOT/imports/<folder>`, then a further quiet delay
+(`inotify_quiet_seconds`, default 2 minutes) before the watcher runs the processor — roughly
+4 minutes from the last upload to processing starting. Nothing here is time critical; this
+trades speed for never processing a partial batch.
 
 ## Troubleshooting
 
-- **invalid_grant / token expired**: re-run the `rclone authorize` step on the MacBook and paste
-  the new token via `rclone config` → edit remote `kosaccounts`.
-- **insufficient_scope / missing_scope**: the app's permissions were changed after authorising.
-  Re-authorise.
-- **`rclone lsd kosaccounts:` shows nothing**: the app folder is empty or was never created;
-  add a file to `/Apps/kosaccounts/receipts` in Dropbox and retry.
-- **rclone: command not found** under cron: install with apt so it lives in `/usr/bin`.
-- Failed runs append a line to `logs/rclone-errors.log`; successful runs log to
-  `logs/rclone-YYYY-MM-DD.log`.
+- **`AuthError` in the journal** (expired or revoked token): re-run
+  `python -m kosaccounts intake auth-setup` and update `/etc/kosaccounts.env`, then
+  `sudo systemctl restart kosaccounts_dropbox_pull.service`.
+- **Cursor reset logged as a warning**: normal and self-healing — the listener rebuilds the
+  cursor and runs a full reconciliation. No action needed unless it happens repeatedly.
+- **`missing_scope` error**: the app's permissions were changed after the token was issued.
+  Redo step 1 (Permissions tab + Submit), then step 2 (re-authorise).
+- **Units sit inactive / `RequiresMountsFor` not satisfied**: `KOS_ROOT`
+  (`/mnt/storage/docs/kosaccounts`) is not mounted yet. The units wait for the mount rather than
+  failing; check `mount` and `systemctl status <unit>` for the reason.
+- **Nothing appears after an upload**: check the settle/quiet timing above before assuming
+  something is wrong: allow at least 4-5 minutes.
 
-## If Full Dropbox access were ever wanted instead
+## Legacy: rclone + cron
 
-Not recommended (the token would see the whole account), but supported: create a *Full Dropbox*
-app, share an ordinary folder with edit rights, and set `DROPBOX_SOURCE="<folder name>"` in
-`scripts/rclone_import.sh`. Everything else is identical.
+The old hourly rclone-based import (`scripts/rclone_import.sh`, `scripts/crontab.txt`) is no
+longer installed (`crontab -l` is empty) and is superseded by the services above. Both files are
+kept on disk only until the new pipeline has passed the acceptance tests in
+`docs/ACCEPTANCE.md`; after that they, and the rclone Dropbox remote configuration, can be
+deleted. Do not reinstall the old crontab.

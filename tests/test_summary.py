@@ -28,16 +28,16 @@ def test_format_summary_populated():
         started=started,
         finished=finished,
         dry_run=False,
-        files_found={"receipt": 5, "bank": 3},
-        files_new={"receipt": 2, "bank": 1},
-        files_flagged={"receipt": 1, "bank": 0},
-        files_errored={"receipt": 0, "bank": 0},
-        rows_added={"receipt": 4, "bank": 2},
+        files_found={"expense": 5, "bank": 3},
+        files_new={"expense": 2, "bank": 1},
+        files_flagged={"expense": 1, "bank": 0},
+        files_errored={"expense": 0, "bank": 0},
+        rows_added={"expense": 4, "bank": 2},
         rows_review=3,
         new_suppliers=["Amazon", "Uber"],
         unmatched_bank_txns=1,
-        unmatched_receipts=2,
-        errors=["receipts/2026-09-01 - test.pdf: validation error"],
+        unmatched_expenses=2,
+        errors=["expenses/2026-09-01 - test.pdf: validation error"],
     )
 
     text = format_summary(summary)
@@ -49,18 +49,18 @@ def test_format_summary_populated():
 
     # Check key numbers are present
     assert "Files found:" in text
-    assert "receipt: 5" in text
+    assert "expense: 5" in text
     assert "bank: 3" in text
 
     assert "Files new:" in text
-    assert "receipt: 2" in text
+    assert "expense: 2" in text
     assert "bank: 1" in text
 
     assert "Files flagged:" in text
     assert "Files errored:" in text
 
     assert "Rows added:" in text
-    assert "receipt: 4" in text
+    assert "expense: 4" in text
     assert "bank: 2" in text
 
     assert "Review rows:" in text
@@ -73,7 +73,7 @@ def test_format_summary_populated():
     assert "Unmatched bank:" in text
     assert "1" in text
 
-    assert "Unmatched receipt:" in text
+    assert "Unmatched expense:" in text
     assert "2" in text
 
     assert "Errors:" in text
@@ -89,7 +89,7 @@ def test_format_summary_dry_run():
         started=started,
         finished=finished,
         dry_run=True,
-        files_new={"receipt": 1},
+        files_new={"expense": 1},
     )
 
     text = format_summary(summary)
@@ -103,7 +103,7 @@ def test_format_summary_unfinished():
     summary = RunSummary(
         started=started,
         finished=None,
-        files_new={"receipt": 1},
+        files_new={"expense": 1},
     )
 
     text = format_summary(summary)
@@ -118,8 +118,8 @@ def test_write_summary_single_run(tmp_path):
     summary = RunSummary(
         started=started,
         finished=finished,
-        files_new={"receipt": 2},
-        rows_added={"receipt": 4},
+        files_new={"expense": 2},
+        rows_added={"expense": 4},
     )
 
     log_path = write_summary(summary, tmp_path)
@@ -139,8 +139,8 @@ def test_write_summary_single_run(tmp_path):
     data = json.loads(json_path.read_text())
     assert data["started"] == started.isoformat()
     assert data["finished"] == finished.isoformat()
-    assert data["files_new"]["receipt"] == 2
-    assert data["rows_added"]["receipt"] == 4
+    assert data["files_new"]["expense"] == 2
+    assert data["rows_added"]["expense"] == 4
 
 
 def test_write_summary_append_twice(tmp_path):
@@ -148,8 +148,8 @@ def test_write_summary_append_twice(tmp_path):
     started1 = datetime(2026, 9, 18, 12, 0, 0)
     started2 = datetime(2026, 9, 18, 12, 15, 0)
 
-    summary1 = RunSummary(started=started1, files_new={"receipt": 1})
-    summary2 = RunSummary(started=started2, files_new={"receipt": 2})
+    summary1 = RunSummary(started=started1, files_new={"expense": 1})
+    summary2 = RunSummary(started=started2, files_new={"expense": 2})
 
     path1 = write_summary(summary1, tmp_path)
     path2 = write_summary(summary2, tmp_path)

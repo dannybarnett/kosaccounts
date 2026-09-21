@@ -1,4 +1,4 @@
-"""Prompt builders for receipt extraction. Pure functions returning strings.
+"""Prompt builders for expense extraction. Pure functions returning strings.
 
 CONTRACT (implement; do not change signatures):
 """
@@ -9,7 +9,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-RECEIPT_JSON_KEYS = [
+EXPENSE_JSON_KEYS = [
     "date",  # YYYY-MM-DD or null
     "supplier_name",  # as printed on the receipt, or null
     "total",  # number or null
@@ -26,7 +26,7 @@ RECEIPT_JSON_KEYS = [
 MAX_PDF_TEXT_CHARS = 6000
 
 
-def receipt_prompt(
+def expense_prompt(
     file_path: Path,
     date_hint: Optional[date],
     supplier_hint: Optional[str],
@@ -34,7 +34,7 @@ def receipt_prompt(
     payment_methods: list[str],
 ) -> str:
     """Instruct the model to Read `file_path`, use hints only as tie-breakers, never guess (use null),
-    and reply with ONLY a JSON object containing exactly RECEIPT_JSON_KEYS."""
+    and reply with ONLY a JSON object containing exactly EXPENSE_JSON_KEYS."""
     hint_lines = []
     if date_hint is not None:
         hint_lines.append(f"- Filename suggests date: {date_hint.isoformat()}")
@@ -85,4 +85,4 @@ Rules:
   multiple pages, a tip included, illegible amounts, etc. Empty list if nothing odd.
 
 Reply with ONLY a single JSON object, no prose, no markdown code fences, containing exactly
-these keys: {", ".join(RECEIPT_JSON_KEYS)}."""
+these keys: {", ".join(EXPENSE_JSON_KEYS)}."""

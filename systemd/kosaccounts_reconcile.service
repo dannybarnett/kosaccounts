@@ -1,0 +1,20 @@
+[Unit]
+Description=Kosaccounts Dropbox reconciliation pass (one-shot; run by kosaccounts_reconcile.timer)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/storage/docs/kosaccounts
+
+[Service]
+Type=oneshot
+User=dannybarnett
+Group=dannybarnett
+WorkingDirectory=/home/dannybarnett/claude-coding/kosaccounts
+EnvironmentFile=/etc/kosaccounts.env
+Environment=HOME=/home/dannybarnett
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/dannybarnett/claude-coding/kosaccounts/.venv/bin/python -m kosaccounts intake reconcile
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full

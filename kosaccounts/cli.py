@@ -3,7 +3,11 @@
 Commands:
   seed  --master PATH        build data/*.csv from the master workbook (seed.py)
   scan                       list new (unprocessed) files without doing anything
-  run   [--dry-run] [--stage receipt|bank]   the hourly pipeline (pipeline.py)
+  run   [--dry-run] [--stage expense|bank] [IMPORTS_FOLDER]   the pipeline (pipeline.py);
+                                             IMPORTS_FOLDER is the trailing path argument the
+                                             watcher passes -- its basename implies --stage if
+                                             --stage is omitted, and must agree with it otherwise
+  intake listen|reconcile|watch|auth-setup|sweep <folder>   event-driven Dropbox intake
   review [--approve "Name=Category" ...]     show pending suppliers / Review rows; approve moves a
                                              pending supplier into suppliers.csv
   reconcile-ledger           report ledger entries whose source file is gone
@@ -20,13 +24,21 @@ import argparse
 import csv
 import logging
 import os
+import signal
+import sys
 import tempfile
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from kosaccounts.categories import Categories
 from kosaccounts.config import Config, load_config
-from kosaccounts.discovery import discover, new_files
+from kosaccounts.discovery import STAGE_FOLDERS, discover, new_files
+from kosaccounts.intake import puller
+from kosaccounts.intake.auth_setup import run_auth_setup
+from kosaccounts.intake.dropbox_client import AuthFailure, MissingSecret, client_from_env
+from kosaccounts.intake.lock import LockHeld
+from kosaccounts.intake.state import IntakeState
+from kosaccounts.intake.watcher import Watcher
 from kosaccounts.ledger import Ledger
 from kosaccounts.pipeline import run_pipeline
 from kosaccounts.seed import seed_from_master
@@ -55,10 +67,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--stage",
         action="append",
-        choices=["receipt", "bank"],
+        choices=["expense", "bank"],
         dest="stage",
         default=None,
         help="Restrict the run to one stage; repeatable",
+    )
+    run_parser.add_argument(
+        "folder",
+        nargs="?",
+        default=None,
+        metavar="IMPORTS_FOLDER",
+        help="imports folder path passed by the watcher; informational",
     )
     run_parser.set_defaults(func=cmd_run)
 
@@ -88,7 +107,61 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dup_parser.set_defaults(func=cmd_duplicates)
 
+    intake_parser = subparsers.add_parser(
+        "intake", help="Event-driven Dropbox intake: listener, watcher and one-off helpers"
+    )
+    intake_sub = intake_parser.add_subparsers(dest="intake_command")
+
+    intake_listen_parser = intake_sub.add_parser(
+        "listen", help="Long-poll Dropbox and pull new files into imports/ (long-running)"
+    )
+    intake_listen_parser.set_defaults(func=cmd_intake_listen)
+
+    intake_reconcile_parser = intake_sub.add_parser(
+        "reconcile", help="One full reconciliation pass over every configured folder"
+    )
+    intake_reconcile_parser.set_defaults(func=cmd_intake_reconcile)
+
+    intake_watch_parser = intake_sub.add_parser(
+        "watch", help="Watch imports/<folder> and run the processor once quiet (long-running)"
+    )
+    intake_watch_parser.set_defaults(func=cmd_intake_watch)
+
+    intake_auth_setup_parser = intake_sub.add_parser(
+        "auth-setup", help="One-time Dropbox OAuth helper; prints a refresh token"
+    )
+    intake_auth_setup_parser.set_defaults(func=cmd_intake_auth_setup)
+
+    intake_sweep_parser = intake_sub.add_parser(
+        "sweep", help="Run one folder's processor command once, now"
+    )
+    intake_sweep_parser.add_argument("folder", choices=["expenses", "bank"])
+    intake_sweep_parser.set_defaults(func=cmd_intake_sweep)
+
+    def _cmd_intake_no_subcommand(args: argparse.Namespace, cfg: Config) -> int:
+        intake_parser.print_help()
+        return 2
+
+    intake_parser.set_defaults(func=_cmd_intake_no_subcommand)
+
     return parser
+
+
+def _sigterm_stop_flag() -> Callable[[], bool]:
+    """Install a SIGTERM handler and return a `stop()` callable it flips to True.
+
+    Lets `systemctl stop` exit the listener/watcher cleanly at their next loop iteration instead
+    of being killed mid-cycle. If the harness kills the process anyway (long-poll can block up to
+    ~8 minutes), no state is lost: nothing is recorded until a batch is fully verified and moved.
+    """
+    stopped = False
+
+    def _handle(signum: int, frame: object) -> None:
+        nonlocal stopped
+        stopped = True
+
+    signal.signal(signal.SIGTERM, _handle)
+    return lambda: stopped
 
 
 def cmd_seed(args: argparse.Namespace, cfg: Config) -> int:
@@ -100,7 +173,7 @@ def cmd_seed(args: argparse.Namespace, cfg: Config) -> int:
 
 def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
     ledger = Ledger(cfg.paths.ledger)
-    discovered = discover(cfg.paths.imports, ("receipt", "bank"))
+    discovered = discover(cfg.paths.imports, ("expense", "bank"))
     new = new_files(discovered, ledger)
 
     for file in new:
@@ -111,7 +184,36 @@ def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
-    summary = run_pipeline(cfg, dry_run=args.dry_run, stages=args.stage or None)
+    stages = args.stage or None
+
+    folder_arg = getattr(args, "folder", None)
+    if folder_arg:
+        # The watcher (kosaccounts.intake.watcher.Watcher.command_for) appends the absolute
+        # imports/<folder> path as the last argv when it invokes the processor, per
+        # specs/README_server_intake.md; this is that path. It's informational (a stage is
+        # already implied by which folder the watcher is running for), but if --stage disagrees
+        # with it, that's a misconfiguration worth failing loudly on rather than silently
+        # picking one.
+        basename = Path(folder_arg).name
+        if basename not in cfg.intake.folders or basename not in STAGE_FOLDERS:
+            print(
+                f"Unrecognised imports folder passed as an argument: {folder_arg!r} "
+                f"(expected one of {sorted(cfg.intake.folders)})",
+                file=sys.stderr,
+            )
+            return 2
+        derived_stage = STAGE_FOLDERS[basename]
+        if stages is None:
+            stages = [derived_stage]
+        elif stages != [derived_stage]:
+            print(
+                f"--stage {stages} contradicts the imports folder argument {folder_arg!r} "
+                f"(folder {basename!r} implies stage {derived_stage!r})",
+                file=sys.stderr,
+            )
+            return 2
+
+    summary = run_pipeline(cfg, dry_run=args.dry_run, stages=stages)
     print(format_summary(summary))
     return 1 if summary.errors else 0
 
@@ -168,9 +270,12 @@ def cmd_review(args: argparse.Namespace, cfg: Config) -> int:
     print()
     print("Review rows:")
     review_rows = []
+    bank_no_receipt_rows = []
     if cfg.paths.output_workbook.exists():
         wb = OutputWorkbook(cfg.paths.output_workbook)
+        # Superseded rows are history, not something to act on; skip them here.
         review_rows = [row for row in wb.rows() if row.status == "Review"]
+        bank_no_receipt_rows = [row for row in wb.bank_rows() if row.status == "No receipt"]
     if not review_rows:
         print("  (none)")
     else:
@@ -178,6 +283,16 @@ def cmd_review(args: argparse.Namespace, cfg: Config) -> int:
         for row in review_rows:
             notes = (row.notes or "")[:60]
             print(f"  {row.date.isoformat():<12} {row.company:<30} {str(row.total):<10} {row.status:<8} {notes}")
+
+    print()
+    print("Bank rows needing a receipt:")
+    if not bank_no_receipt_rows:
+        print("  (none)")
+    else:
+        print(f"  {'Date':<12} {'Amount':<10} Description")
+        for row in bank_no_receipt_rows:
+            description = (row.description or "")[:50]
+            print(f"  {row.date.isoformat():<12} {str(row.amount):<10} {description}")
 
     approvals: list[str] = getattr(args, "approve", None) or []
     if not approvals:
@@ -242,6 +357,61 @@ def cmd_duplicates(args: argparse.Namespace, cfg: Config) -> int:
     if args.out:
         out = write_report(pairs, (cfg.paths.root / args.out).resolve())
         print(f"written {out}")
+    return 0
+
+
+def cmd_intake_listen(args: argparse.Namespace, cfg: Config) -> int:
+    stop = _sigterm_stop_flag()
+    try:
+        client = client_from_env()
+        state = IntakeState(cfg.intake.db_path)
+        puller.listen(client, state, cfg.intake, stop=stop)
+    except (MissingSecret, AuthFailure) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_intake_reconcile(args: argparse.Namespace, cfg: Config) -> int:
+    try:
+        client = client_from_env()
+        state = IntakeState(cfg.intake.db_path)
+        results = puller.reconcile_all(client, state, cfg.intake)
+    except (MissingSecret, AuthFailure) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    if not results:
+        print("skipped: lock held")
+        return 0
+
+    any_failed = False
+    for result in results:
+        if result.failed:
+            any_failed = True
+        print(
+            f"{result.folder}: downloaded {len(result.downloaded)}, "
+            f"failed {len(result.failed)}, skipped_settle={result.skipped_settle}"
+        )
+    return 1 if any_failed else 0
+
+
+def cmd_intake_watch(args: argparse.Namespace, cfg: Config) -> int:
+    stop = _sigterm_stop_flag()
+    Watcher(cfg).run(stop=stop)
+    return 0
+
+
+def cmd_intake_auth_setup(args: argparse.Namespace, cfg: Config) -> int:
+    return run_auth_setup()
+
+
+def cmd_intake_sweep(args: argparse.Namespace, cfg: Config) -> int:
+    try:
+        Watcher(cfg).process_once(args.folder)
+    except LockHeld as exc:
+        print(f"skipped: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

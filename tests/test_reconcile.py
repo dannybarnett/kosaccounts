@@ -74,13 +74,12 @@ def make_row(
     notes: str = "",
     status: str = "OK",
     bank_ref: str = "",
-    source_file: str = "receipts/2026-09-01 - Mood.pdf",
+    source_file: str = "expenses/2026-09-01 - Mood.pdf",
 ) -> PurchaseRow:
     return PurchaseRow(
         date=date(2026, 9, day),
         company=company,
         category="Fabric",
-        schedule_c="Cost of Goods Sold",
         net=Decimal(total),
         sales_tax=Decimal("0.00"),
         total=Decimal(total),
@@ -143,11 +142,11 @@ def test_matches_within_amount_and_window_sets_bank_ref_and_payment_method(cfg, 
     result = reconcile([row], [txn], suppliers, categories, cfg, PROCESSED_ON)
 
     assert row.bank_ref == "txn-1"
-    assert row.payment_method == "Card (statement)"
+    assert row.payment_method == cfg.bank.statement_payment_method
     assert result.updated_rows == [row]
     assert result.new_rows == []
     assert result.unmatched_txns == []
-    assert result.unmatched_receipts == []
+    assert result.unmatched_expenses == []
     assert result.ignored_txns == []
 
 
@@ -269,12 +268,11 @@ def test_unmatched_debit_creates_review_row_with_known_supplier_category(cfg, ca
 
     assert new_row.company == "Amazon"
     assert new_row.category == "Fabric"
-    assert new_row.schedule_c == "Cost of Goods Sold"
     assert new_row.net == Decimal("33.21")
     assert new_row.total == Decimal("33.21")
     assert new_row.sales_tax == Decimal("0")
     assert new_row.tax_rate == Decimal("0")
-    assert new_row.payment_method == "Card (statement)"
+    assert new_row.payment_method == cfg.bank.statement_payment_method
     assert new_row.notes == "From bank statement; no receipt"
     assert new_row.year == 2026
     assert new_row.source_file == "bank/statement_sep.html"
@@ -297,7 +295,6 @@ def test_unmatched_debit_new_supplier_gets_empty_category_and_description_as_com
     new_row = result.new_rows[0]
     assert new_row.company == "Weird New Vendor LLC"
     assert new_row.category == ""
-    assert new_row.schedule_c == ""
     assert new_row.status == "Review"
 
 
@@ -325,7 +322,7 @@ def test_row_inside_statement_period_with_no_match_gets_note_once_across_two_cal
 
     assert row.bank_ref == ""  # no amount match, so it's genuinely unmatched
     assert row.notes == "No bank transaction found"
-    assert row in result1.unmatched_receipts
+    assert row in result1.unmatched_expenses
     assert row in result1.updated_rows
 
     # Re-running reconcile on the same row (as the workbook would across a rerun) must not
@@ -334,7 +331,7 @@ def test_row_inside_statement_period_with_no_match_gets_note_once_across_two_cal
 
     assert row.notes == "No bank transaction found"
     assert row.notes.count("No bank transaction found") == 1
-    assert row in result2.unmatched_receipts
+    assert row in result2.unmatched_expenses
 
 
 def test_row_inside_statement_period_with_no_match_appends_to_existing_notes(cfg, categories) -> None:
@@ -369,7 +366,7 @@ def test_row_outside_every_statement_period_is_untouched(cfg, categories) -> Non
 
     assert row.notes == ""
     assert row.bank_ref == ""
-    assert row not in result.unmatched_receipts
+    assert row not in result.unmatched_expenses
     assert row not in result.updated_rows
 
 
@@ -388,7 +385,97 @@ def test_new_rows_created_this_call_are_excluded_from_coverage_check(cfg, catego
 
     assert len(result.new_rows) == 1
     assert result.new_rows[0].notes == "From bank statement; no receipt"
-    assert result.unmatched_receipts == []
+    assert result.unmatched_expenses == []
+
+
+# ---------------------------------------------------------------------------
+# all_rows: resurrected "No receipt" bank rows and superseding bank-only rows
+# ---------------------------------------------------------------------------
+
+
+def test_late_receipt_claims_old_unmatched_debit_and_supersedes_bank_only_row(cfg, categories) -> None:
+    """A prior run left a bank-only Review row for an unmatched debit. This run, a late receipt
+    arrives for that same purchase; the resurrected txn (BankRow.to_txn()) should match the new
+    receipt row and the old bank-only row should be superseded."""
+    bank_only_row = make_row(
+        day=5,
+        company="Weird New Vendor LLC",
+        total="12.00",
+        notes="From bank statement; no receipt",
+        status="Review",
+        bank_ref="old-ref-1",
+        source_file="bank/statement_aug.html",
+    )
+    receipt_row = make_row(
+        day=5,
+        company="Weird New Vendor LLC",
+        total="12.00",
+        source_file="expenses/2026-09-05 - Weird New Vendor.pdf",
+    )
+    # Resurrected from the Bank sheet: same ref, description, amount, date as when it first appeared.
+    old_txn = make_txn(day=5, description="Weird New Vendor LLC", amount="12.00", ref="old-ref-1")
+    suppliers = FakeSupplierBook()
+
+    result = reconcile(
+        [receipt_row],
+        [old_txn],
+        suppliers,
+        categories,
+        cfg,
+        PROCESSED_ON,
+        all_rows=[bank_only_row, receipt_row],
+    )
+
+    assert receipt_row.bank_ref == "old-ref-1"
+    assert result.matched == {"old-ref-1": receipt_row.source_file}
+    assert bank_only_row.status == "Superseded"
+    assert f"Receipt arrived: {receipt_row.source_file}" in bank_only_row.notes
+    assert result.superseded_rows == [bank_only_row]
+    # No duplicate bank-only row is created for the (now matched) old debit.
+    assert result.new_rows == []
+
+
+def test_old_unmatched_no_receipt_txn_is_left_alone(cfg, categories) -> None:
+    """An old "No receipt" txn that still has no matching receipt this run must not spawn a
+    duplicate bank-only row: it already has one in the workbook."""
+    bank_only_row = make_row(
+        day=5,
+        company="Weird New Vendor LLC",
+        total="12.00",
+        notes="From bank statement; no receipt",
+        status="Review",
+        bank_ref="old-ref-2",
+        source_file="bank/statement_aug.html",
+    )
+    old_txn = make_txn(day=5, description="Weird New Vendor LLC", amount="12.00", ref="old-ref-2")
+    suppliers = FakeSupplierBook()
+
+    result = reconcile(
+        [],  # no receipt rows this run to claim it
+        [old_txn],
+        suppliers,
+        categories,
+        cfg,
+        PROCESSED_ON,
+        all_rows=[bank_only_row],
+    )
+
+    assert result.new_rows == []
+    assert result.unmatched_txns == []
+    assert result.superseded_rows == []
+    assert bank_only_row.status == "Review"  # untouched
+
+
+def test_all_rows_defaults_to_rows_when_omitted(cfg, categories) -> None:
+    """Backward compatible: omitting all_rows behaves exactly as before (no resurrection tricks)."""
+    row = make_row(day=3, total="108.88", payment_method="")
+    txn = make_txn(day=5, amount="108.88", ref="txn-1")
+    suppliers = FakeSupplierBook()
+
+    result = reconcile([row], [txn], suppliers, categories, cfg, PROCESSED_ON)
+
+    assert row.bank_ref == "txn-1"
+    assert result.superseded_rows == []
 
 
 def test_does_not_mutate_input_txns(cfg, categories) -> None:
@@ -401,3 +488,32 @@ def test_does_not_mutate_input_txns(cfg, categories) -> None:
 
     assert txn.ref == original_ref  # BankTxn itself untouched
     assert row.bank_ref == "txn-11"
+
+
+def test_statement_payment_method_comes_from_config(cfg, tmp_path):
+    """Bank-only rows and matched receipts with no hint use cfg.bank.statement_payment_method."""
+    from datetime import date, datetime
+    from decimal import Decimal
+    from kosaccounts.models import BankTxn, PurchaseRow, SupplierMatch
+    from kosaccounts.reconcile import reconcile
+    from kosaccounts.categories import Categories
+
+    cats = tmp_path / "categories.csv"
+    cats.write_text("Category,Schedule C\nFabric,Cost of Goods Sold\n")
+    categories = Categories(cats)
+
+    class Book:
+        def match(self, name, context="", source_file=""):
+            return SupplierMatch(name, None, None, 0, "new", is_new=True)
+
+    cfg.bank.statement_payment_method = "Discover"
+    now = datetime(2026, 9, 18, 12, 0)
+    receipt = PurchaseRow(date(2026, 8, 1), "Mood", "Fabric", Decimal("10"), Decimal("0"), Decimal("10"),
+                          Decimal("0"), "", "", 2026, "expenses/a.pdf", now)
+    txns = [
+        BankTxn(date(2026, 8, 1), "SQ *MOOD", Decimal("10"), "debit", "bank/s.csv", "bank/s.csv#1"),
+        BankTxn(date(2026, 8, 2), "UNKNOWN SHOP", Decimal("7"), "debit", "bank/s.csv", "bank/s.csv#2"),
+    ]
+    result = reconcile([receipt], txns, Book(), categories, cfg, now)
+    assert receipt.payment_method == "Discover"
+    assert result.new_rows[0].payment_method == "Discover"

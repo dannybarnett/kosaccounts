@@ -1,33 +1,73 @@
 # kosaccounts
 
-Unattended bookkeeping pipeline for Kosibah LLC. Receipts and bank statements dropped into
-Dropbox are copied to this server hourly, extracted, matched against the known supplier list,
-reconciled, and appended to a paste-ready workbook that mirrors the master's Purchases sheet.
+Unattended bookkeeping pipeline for Kosibah LLC. Expense receipts and bank statements dropped
+into Dropbox are picked up by a long-poll listener within minutes, extracted, matched against the
+known supplier list, reconciled, and appended to a paste-ready workbook that mirrors the master's
+Purchases sheet.
 
-Design and decisions: `specs/` (requirements) and `~/.claude/plans/greedy-squishing-canyon.md`.
-Dropbox and rclone setup: `scripts/README-dropbox.md`.
+Design and decisions: `specs/` (requirements) and `~/.claude/plans/serene-jingling-rain.md`.
+Dropbox setup: `scripts/README-dropbox.md`. Acceptance checklist: `docs/ACCEPTANCE.md`.
 
 ## How it runs
 
-| When | What | Log |
+Three systemd units, event-driven end to end:
+
+| Unit | What | State |
 |---|---|---|
-| every hour at :00 | `scripts/rclone_import.sh` copies Dropbox `/Apps/kosaccounts/*` into `imports/` | `logs/rclone-YYYY-MM-DD.log`, failures in `logs/rclone-errors.log` |
-| every hour at :15 | `scripts/run_pipeline.sh` runs `python -m kosaccounts run` | `logs/pipeline-YYYY-MM-DD.log`, run summaries in `logs/run-YYYY-MM-DD.log`, failures in `logs/pipeline-errors.log` |
+| `kosaccounts_dropbox_pull.service` | Long-polls the Dropbox API; once a folder settles, downloads the batch to a staging area, verifies it, then atomically renames it into `KOS_ROOT/imports/<folder>` | `KOS_ROOT/state/intake.sqlite` |
+| `kosaccounts_import_watch.service` | inotify watches `KOS_ROOT/imports/{expenses,bank}`; once a folder has been quiet for 2 minutes, runs `scripts/run_pipeline.sh --stage expense` or `--stage bank` under the pipeline lock | (stateless; the ledger makes reruns idempotent) |
+| `kosaccounts_reconcile.timer` | Hourly full reconcile, catching anything the listener's long-poll missed (e.g. it was down) | same lock/state as the listener |
 
-Both scripts take a lock, so overlapping runs are skipped rather than doubled.
+Unit logs go to the journal: `journalctl -u kosaccounts_dropbox_pull -f`,
+`journalctl -u kosaccounts_import_watch -f`. The processor's own logs still land in
+`logs/pipeline-YYYY-MM-DD.log` and run summaries in `logs/run-YYYY-MM-DD.log`, same as before.
 
-Per run: new files (by content hash, so renames are ignored and edited files are reprocessed)
-are found under `imports/receipts` and `imports/bank`; `imports/invoices` is ignored for now.
-Receipts are read by a headless Claude call (`claude -p`, model set in `config.toml`); bank
-statements are parsed by deterministic parsers (HTML, CSV) with a model fallback that flags the
-file for attention. Supplier names are matched by alias, exact, fuzzy, then model adjudication.
-Nothing ever blocks: doubtful rows get `Status = Review` and an amber fill.
+`KOS_ROOT=/mnt/storage/docs/kosaccounts` holds only data the listener/watcher touch:
+`imports/`, `.staging/` and `state/`. Code, config, `data/`, `output/` and `logs/` stay in this
+repo. The repo's `imports` symlink points at `KOS_ROOT/imports`, so paths like
+`imports/expenses/...` below are the same files either way.
+
+Expect roughly 2 minutes settle (Dropbox listener waiting for uploads to stop trickling in) plus
+2 minutes quiet (watcher waiting before it processes) between the last file landing in Dropbox
+and processing starting -- nothing here is time critical; it trades speed for never processing a
+partial batch.
+
+New files (by content hash, so renames are ignored and edited files are reprocessed) are found
+under `imports/expenses` and `imports/bank`; `imports/invoices` is ignored (Yemi enters money
+received directly in a spreadsheet now, not via Dropbox). Expense documents are read by a
+headless Claude call (`claude -p`, model set in `config.toml`); bank statements are parsed by
+deterministic parsers (HTML, CSV) with a model fallback that flags the file for attention.
+Supplier names are matched by alias, exact, fuzzy, then model adjudication. Nothing ever blocks:
+doubtful rows get `Status = Review` and an amber fill.
+
+### Same file name, new content
+
+The listener never overwrites a file. If a newly-uploaded file's name collides with one already
+imported but the content differs, it is saved as `<stem>__<hash8><ext>` alongside the original.
+The pipeline recognises this pattern as a re-upload of `<stem><ext>`: the earlier row's `Status`
+becomes `Superseded`, and if it had already been matched to a bank transaction, that transaction
+is released back to `No receipt` so the corrected row can claim it.
+
+### Already-present files are adopted, not re-downloaded
+
+If the listener finds a file already imported by the old rclone-based pipeline sitting at the
+expected path in `KOS_ROOT/imports/<folder>` with byte-identical content, it records that file as
+imported without downloading or touching it -- it is "adopted" into the state store rather than
+fetched again. This is what let the files already on disk when the listener was first installed
+carry over cleanly.
+
+### Legacy
+
+The old hourly rclone + cron import is no longer installed (`crontab -l` is empty).
+`scripts/rclone_import.sh` and `scripts/crontab.txt` are kept on disk only until the units above
+have passed the acceptance checklist in `docs/ACCEPTANCE.md`; after that they, and the rclone
+Dropbox remote configuration, will be deleted.
 
 ## Files you will look at
 
 | Path | Purpose |
 |---|---|
-| `output/kosibah_import.xlsx` | The output workbook. Columns B..M are the master's 12 columns; N..Q are Source file, Processed on, Status, Bank ref. Copy rows into the master each quarter. Written atomically, safe to rsync any time. |
+| `output/kosibah_import.xlsx` | The output workbook. **Purchases** tab: columns B..L (Date..Year) are the master's columns (the master derives Schedule C from Category, so it isn't pasted here); M..P are Source file, Processed on, Status, Bank ref. `Status = Superseded` (grey, strike-through) marks a row replaced by a re-uploaded receipt or by a later receipt claiming a bank-only row -- kept for history, excluded from duplicate checks and from `review`'s Review-rows listing. **Bank** tab: every parsed bank transaction, one row per statement line, with its own reconciliation state (`Matched` / `No receipt` / `Ignored`) -- the source of truth for bank transactions across runs, so a late-arriving receipt can still claim an old unmatched debit. Duplicate (same date/company/total) and re-uploaded rows follow the same `Status = Review` / `Superseded` rules. Copy Purchases rows into the master each quarter. Written atomically, safe to rsync any time. |
 | `data/new_suppliers_pending.csv` | Suppliers seen for the first time, with a suggested category. Approve with `review --approve`. |
 | `data/suppliers.csv` | Known suppliers and default categories (seeded from the master). |
 | `data/supplier_aliases.csv` | Spelling/descriptor variants -> canonical supplier. Add rows by hand to merge duplicates. |
@@ -41,21 +81,41 @@ Nothing ever blocks: doubtful rows get `Status = Review` and an amber fill.
 cd /home/dannybarnett/claude-coding/kosaccounts
 .venv/bin/python -m kosaccounts scan                 # what would be processed next run
 .venv/bin/python -m kosaccounts run --dry-run        # full run, model calls included, nothing written
-.venv/bin/python -m kosaccounts run                  # what cron runs
+.venv/bin/python -m kosaccounts run                  # what the watcher runs per folder
 .venv/bin/python -m kosaccounts review               # pending suppliers + Review rows
 .venv/bin/python -m kosaccounts review --approve "New Supplier=Fabric"
 .venv/bin/python -m kosaccounts duplicates           # likely duplicate suppliers in suppliers.csv
 .venv/bin/python -m kosaccounts reconcile-ledger     # ledger entries whose source file is gone
 .venv/bin/python -m kosaccounts seed                 # rebuild data/*.csv from the master workbook
+.venv/bin/python -m kosaccounts intake listen        # Dropbox long-poll listener (what the service runs)
+.venv/bin/python -m kosaccounts intake reconcile     # one full reconciliation pass (what the timer runs)
+.venv/bin/python -m kosaccounts intake watch         # import watcher (what the service runs)
+.venv/bin/python -m kosaccounts intake sweep expenses  # run one folder's processor once, by hand
+.venv/bin/python -m kosaccounts intake sweep bank
+.venv/bin/python -m kosaccounts intake auth-setup    # one-time Dropbox OAuth helper
 .venv/bin/python -m pytest                           # test suite
 ```
+
+Managing the services:
+
+```bash
+sudo systemctl status kosaccounts_dropbox_pull.service kosaccounts_import_watch.service
+systemctl list-timers 'kosaccounts*'
+sudo systemctl restart kosaccounts_dropbox_pull.service
+journalctl -u kosaccounts_dropbox_pull -f
+journalctl -u kosaccounts_import_watch -f
+```
+
+See `scripts/README-dropbox.md` for first-time setup (app permissions, `auth-setup`, the env
+file, installing the units) and `docs/ACCEPTANCE.md` for the acceptance checklist to run once
+they're installed.
 
 ## Running by hand and watching progress
 
 ```bash
 cd /home/dannybarnett/claude-coding/kosaccounts
-scripts/rclone_import.sh        # same as the :00 cron job
-scripts/run_pipeline.sh         # same as the :15 cron job; output goes to the log, not the screen
+.venv/bin/python -m kosaccounts intake sweep expenses   # run the expense stage once, by hand
+scripts/run_pipeline.sh --stage expense                 # same thing, via the lock the watcher uses
 ```
 
 Follow a run live from a second terminal:
@@ -65,10 +125,12 @@ tail -f logs/pipeline-$(date +%F).log
 ```
 
 Expect roughly 10 seconds per receipt (each one is a model call); bank CSVs take under a second.
-The workbook, ledger and run summary are written only at the end of the run. The scripts take a
-lock, so a manual run started while cron's run is active exits at once with an "already running"
-line in `logs/pipeline.lock.log`. Running `.venv/bin/python -m kosaccounts run` directly prints
-to the screen instead, but takes no lock, so avoid starting it right around :15.
+The workbook, ledger and run summary are written only at the end of the run. `run_pipeline.sh`
+and the watcher share `logs/pipeline.lock`, so a manual run started while the watcher is mid-run
+exits at once with an "already running" line in `logs/pipeline.lock.log`. Running
+`.venv/bin/python -m kosaccounts run` directly prints to the screen instead, but takes no lock.
+When the watcher itself invokes `run_pipeline.sh` it sets `KOSACCOUNTS_LOCK_HELD=1` so the script
+skips taking the lock a second time (it already holds it) -- never set that variable by hand.
 
 ## Reviewing a run
 
@@ -79,12 +141,19 @@ to the screen instead, but takes no lock, so avoid starting it right around :15.
 4. To reprocess a file, delete its line from `data/processing_log.csv` (and its row from the
    workbook) and it will be picked up next run.
 
-## Receipt filenames
+## Expense filenames
 
 `YYYY-MM-DD Supplier.pdf` gives the reader a date and supplier hint (tie-breakers only; the
 receipt itself wins). Dropbox File Requests append the uploader's name, e.g.
-`2026-06-12 Guide Fabrics Yemi Osunkoya.pdf`; names listed under `receipts.filename_strip` in
+`2026-06-12 Guide Fabrics Yemi Osunkoya.pdf`; names listed under `expenses.filename_strip` in
 `config.toml` are removed from the hint. Add a new uploader's name there.
+
+Files are matched by content hash, not name, so re-uploading the exact same file again (e.g. an
+accidental duplicate Dropbox sync) is silently skipped -- nothing changes. Re-uploading a
+*corrected* receipt under the **same filename** (different content -> a new hash) supersedes the
+row from the earlier upload: the old row's `Status` becomes `Superseded` with a note recording the
+date, and if it had already been matched to a bank transaction, that transaction is released back
+to `No receipt` on the Bank tab so the corrected row can claim it on this or a later run.
 
 ## Bank statements
 
@@ -96,8 +165,9 @@ parser recognises is sent to the model and the file is flagged; add a parser und
 ## Python environment
 
 `.venv/` is a private Python environment inside the project (built with uv, no sudo needed).
-`.venv/bin/python` is the interpreter with this project's packages; cron and the scripts use that
-path, so nothing depends on activating it. `requirements.txt` is the source of truth for packages.
+`.venv/bin/python` is the interpreter with this project's packages; the systemd units and scripts
+use that path, so nothing depends on activating it. `requirements.txt` is the source of truth for
+packages.
 
 ```bash
 ~/.local/bin/uv pip install --python .venv/bin/python -r requirements.txt            # sync after a pull
@@ -110,4 +180,5 @@ Never `sudo pip` or `apt` Python packages for this project; the venv would not s
 ## Setup on a fresh machine
 
 `scripts/install.sh` (prints the sudo apt line, installs uv, builds `.venv`), then
-`scripts/README-dropbox.md`, then `crontab scripts/crontab.txt`.
+`scripts/README-dropbox.md` (Dropbox app permissions, `intake auth-setup`, the `/etc/kosaccounts.env`
+file), then `scripts/install_systemd.sh` (installs and starts the three units).
