@@ -1,7 +1,6 @@
 # financial data never goes in git
 specs/*.xlsx
 imports
-output
 logs
 data/processing_log.csv
 data/new_suppliers_pending.csv
@@ -22,4 +21,5 @@ kosaccounts.env
 
 # one-off migration backups (financial data)
 data/*.bak-*
+output/*.bak-*
 output/*.bak-*
