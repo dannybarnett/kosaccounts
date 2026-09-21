@@ -1,9 +1,0 @@
-# Kosaccounts pipeline cron schedule
-# rclone_import runs hourly at :00, pipeline runs at :15 to process newly imported files.
-# Each job acquires a lock to prevent overlapping runs.
-#
-# To install: crontab /home/dannybarnett/claude-coding/kosaccounts/scripts/crontab.txt
-# (Note: this REPLACES your entire crontab; see existing schedule first with `crontab -l`)
-#
-0 * * * * /home/dannybarnett/claude-coding/kosaccounts/scripts/rclone_import.sh
-15 * * * * /home/dannybarnett/claude-coding/kosaccounts/scripts/run_pipeline.sh

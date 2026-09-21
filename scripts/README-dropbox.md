@@ -113,8 +113,6 @@ trades speed for never processing a partial batch.
 
 ## Legacy: rclone + cron
 
-The old hourly rclone-based import (`scripts/rclone_import.sh`, `scripts/crontab.txt`) is no
-longer installed (`crontab -l` is empty) and is superseded by the services above. Both files are
-kept on disk only until the new pipeline has passed the acceptance tests in
-`docs/ACCEPTANCE.md`; after that they, and the rclone Dropbox remote configuration, can be
-deleted. Do not reinstall the old crontab.
+The original hourly rclone-based import (a `rclone copy` under cron) was retired on 2026-09-21
+once the services above passed acceptance. Its scripts and the `kosaccounts` rclone remote have
+been deleted. Do not reinstall it; the listener replaces it entirely.

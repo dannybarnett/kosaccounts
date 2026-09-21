@@ -34,12 +34,6 @@ def _bash_syntax_ok(script: Path) -> None:
     assert result.returncode == 0, f"Syntax error in {script.name}: {result.stderr}"
 
 
-def test_rclone_import_sh_syntax():
-    """rclone_import.sh is a legacy file, kept on disk until the new pipeline passes
-    acceptance, but must still be syntactically valid."""
-    _bash_syntax_ok(get_scripts_dir() / "rclone_import.sh")
-
-
 def test_run_pipeline_sh_syntax():
     _bash_syntax_ok(get_scripts_dir() / "run_pipeline.sh")
 

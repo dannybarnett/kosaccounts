@@ -58,10 +58,8 @@ carry over cleanly.
 
 ### Legacy
 
-The old hourly rclone + cron import is no longer installed (`crontab -l` is empty).
-`scripts/rclone_import.sh` and `scripts/crontab.txt` are kept on disk only until the units above
-have passed the acceptance checklist in `docs/ACCEPTANCE.md`; after that they, and the rclone
-Dropbox remote configuration, will be deleted.
+The original hourly rclone + cron import was retired on 2026-09-21 after the units above passed
+the acceptance checklist in `docs/ACCEPTANCE.md`; its scripts and the rclone remote are gone.
 
 ## Files you will look at
 

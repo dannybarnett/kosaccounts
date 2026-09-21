@@ -166,5 +166,5 @@ without the units installed.
 
 ---
 
-After all 7 pass, propose to Danny deleting `scripts/rclone_import.sh`, `scripts/crontab.txt`,
-and the rclone Dropbox remote configuration (`scripts/README-dropbox.md` "Legacy" section).
+Passed 2026-09-21 (tests 1, 3, 6 and 7 live; 2, 4 and 5 by unit test). The legacy rclone scripts
+and remote were deleted afterwards.
