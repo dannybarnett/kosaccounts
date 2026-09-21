@@ -48,6 +48,8 @@ class PathsConfig:
 class ProcessingConfig:
     block_on_flags: bool = False
     stages: list[str] = field(default_factory=lambda: ["expense", "bank"])
+    commit_outputs: bool = True
+    push_outputs: bool = True
 
 
 @dataclass

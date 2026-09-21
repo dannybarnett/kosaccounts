@@ -1,9 +1,13 @@
 """Output workbook (openpyxl): output/kosibah_import.xlsx.
 
 Sheet "Purchases" (table "KosibahImport"): row 1 title ("Kosibah LLC purchases - imported"), row 3
-headers (PurchaseRow.COLUMNS, columns B..P), data from row 4, a totals row after the last data row
+headers (PurchaseRow.COLUMNS, columns B..Q), data from row 4, a totals row after the last data row
 (Net, Sales Tax, Total summed with SUBTOTAL(109, ...) so filters work). The Excel table spans
-header..last data row (totals row is outside the table, like the master's).
+header..last data row (totals row is outside the table, like the master's). Column Q ("Copied to
+master") is human-owned: Danny fills it in by hand after pasting a row into his master accounts
+spreadsheet; the pipeline round-trips it unchanged and never writes to it itself. Workbooks written
+before this column existed are upgraded on load: the header cell is filled in if empty, and save()
+extends the table ref / totals row / formatting to cover it.
 
 Sheet "Bank" (table "KosibahBank"), created the first time it is needed: row 1 title ("Kosibah LLC
 bank transactions - reconciliation"), row 3 headers (BankRow.COLUMNS, columns B..L), data from row
@@ -27,6 +31,7 @@ from pathlib import Path
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from kosaccounts.models import BankRow, PurchaseRow
@@ -35,7 +40,7 @@ TITLE = "Kosibah LLC purchases - imported"
 HEADER_ROW = 3
 FIRST_DATA_ROW = 4
 FIRST_COL = 2  # column B
-LAST_COL = 16  # column P
+LAST_COL = 17  # column Q
 
 BANK_TITLE = "Kosibah LLC bank transactions - reconciliation"
 BANK_HEADER_ROW = 3
@@ -73,6 +78,7 @@ COLUMN_WIDTHS = {
     "N": 18,
     "O": 10,
     "P": 24,
+    "Q": 18,
 }
 
 def _check_formula(r: int) -> str:
@@ -86,6 +92,7 @@ class OutputWorkbook:
         if self.path.exists():
             self.wb = openpyxl.load_workbook(self.path, data_only=False)
             self.ws = self.wb[PurchaseRow.SHEET_NAME]
+            self._upgrade_headers()
             self._last_data_row = self._find_last_data_row()
             if BankRow.SHEET_NAME in self.wb.sheetnames:
                 self.ws_bank = self.wb[BankRow.SHEET_NAME]
@@ -109,6 +116,15 @@ class OutputWorkbook:
     # ------------------------------------------------------------------
     # Purchases sheet
     # ------------------------------------------------------------------
+
+    def _upgrade_headers(self) -> None:
+        """Workbooks written before a column existed on PurchaseRow.COLUMNS are missing its header
+        cell; fill it in so rows()/save() treat the column as present. Never touches a header cell
+        that already has a value."""
+        for i, header in enumerate(PurchaseRow.COLUMNS):
+            cell = self.ws.cell(row=HEADER_ROW, column=FIRST_COL + i)
+            if cell.value is None or str(cell.value).strip() == "":
+                cell.value = header
 
     def _find_last_data_row(self) -> int:
         """Row 4 down to the row before "Total" in column B, or the last non-empty B."""
@@ -151,6 +167,8 @@ class OutputWorkbook:
             bank_ref = self.ws.cell(row=r, column=16).value
             if bank_ref is None:
                 bank_ref = ""
+            copied_to_master = self.ws.cell(row=r, column=17).value
+            copied_to_master = "" if copied_to_master is None else str(copied_to_master).strip()
 
             row = PurchaseRow(
                 date=row_date,
@@ -167,6 +185,7 @@ class OutputWorkbook:
                 processed_on=processed_on,
                 status=status,
                 bank_ref=str(bank_ref),
+                copied_to_master=copied_to_master,
                 sheet_row=r,
             )
             result.append(row)
@@ -188,6 +207,7 @@ class OutputWorkbook:
         self.ws.cell(row=r, column=14, value=row.processed_on)
         self.ws.cell(row=r, column=15, value=row.status)
         self.ws.cell(row=r, column=16, value=row.bank_ref)
+        self.ws.cell(row=r, column=17, value=row.copied_to_master)
         row.sheet_row = r
 
     def append(self, rows: list[PurchaseRow]) -> None:
@@ -369,11 +389,12 @@ class OutputWorkbook:
         if table_name in ws.tables:
             del ws.tables[table_name]
 
+        last_col_letter = get_column_letter(LAST_COL)
         if has_data:
-            table_ref = f"B{HEADER_ROW}:P{last}"
+            table_ref = f"B{HEADER_ROW}:{last_col_letter}{last}"
         else:
             # openpyxl needs at least one data row; use a blank row, skip totals.
-            table_ref = f"B{HEADER_ROW}:P{FIRST_DATA_ROW}"
+            table_ref = f"B{HEADER_ROW}:{last_col_letter}{FIRST_DATA_ROW}"
 
         table = Table(displayName=table_name, ref=table_ref)
         table.tableStyleInfo = _TABLE_STYLE

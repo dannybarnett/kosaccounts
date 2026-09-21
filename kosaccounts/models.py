@@ -120,7 +120,9 @@ class BankTxn:
 class PurchaseRow:
     """One row of the output workbook. Column order is COLUMNS; the Check column is a formula
     written by workbook.py and is not a field here. Schedule C is deliberately absent: the master
-    workbook derives it from Category."""
+    workbook derives it from Category. "Copied to master" (copied_to_master) is human-owned: Danny
+    marks it by hand once he has pasted the row into his master accounts spreadsheet, and the
+    pipeline must never overwrite a value he typed there."""
 
     date: date
     company: str
@@ -136,6 +138,7 @@ class PurchaseRow:
     processed_on: datetime
     status: RowStatus = "OK"
     bank_ref: str = ""
+    copied_to_master: str = ""
     sheet_row: Optional[int] = None  # 1-based worksheet row; set when read back from the workbook
 
     COLUMNS: ClassVar[list[str]] = [
@@ -154,6 +157,7 @@ class PurchaseRow:
         "Processed on",
         "Status",
         "Bank ref",
+        "Copied to master",
     ]
     TABLE_NAME: ClassVar[str] = "KosibahImport"
     SHEET_NAME: ClassVar[str] = "Purchases"

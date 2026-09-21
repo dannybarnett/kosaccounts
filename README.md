@@ -61,17 +61,79 @@ carry over cleanly.
 The original hourly rclone + cron import was retired on 2026-09-21 after the units above passed
 the acceptance checklist in `docs/ACCEPTANCE.md`; its scripts and the rclone remote are gone.
 
+## Monitoring and debugging
+
+Quick answers to "is this working?", in the order you'd normally ask them. For the full runbook
+(symptom-by-symptom troubleshooting, the Mac side, forcing a re-import, foreground debugging)
+see `docs/README_kosibah_intake_operations.md`.
+
+**Are the services up?**
+
+```bash
+systemctl status kosaccounts_dropbox_pull.service kosaccounts_import_watch.service --no-pager
+systemctl list-timers 'kosaccounts*'
+systemctl --failed
+```
+
+**Did the last intake batch land?** Look for a line like `folder expenses: downloaded N file(s)`:
+
+```bash
+journalctl -u kosaccounts_dropbox_pull -n 100 --no-pager
+```
+
+**Did the processor run and finish?** The watcher logs `processing folder=...` then
+`finished folder=... exit_code=...`; the processor's own logs have the detail:
+
+```bash
+journalctl -u kosaccounts_import_watch -n 100 --no-pager
+tail logs/run-$(date +%F).log
+cat logs/last_run.json
+```
+
+**How many rows were processed? Any Review rows or new suppliers?**
+
+```bash
+.venv/bin/python -m kosaccounts review
+```
+
+**What is still waiting?**
+
+```bash
+.venv/bin/python -m kosaccounts scan
+find /mnt/storage/docs/kosaccounts/.staging -type f   # should print nothing outside a batch in flight
+```
+
+**Did the commit and push happen?**
+
+```bash
+grep "git:" logs/pipeline-$(date +%F).log
+git log -3 --oneline
+```
+
+**Timings.** End to end, from the last file landing in Dropbox to processing starting, is roughly
+4-5 minutes (settle + quiet, see "How it runs" above); each receipt is one model call (~10
+seconds), bank statements are near-instant. Measured live: the listener wakes within seconds of
+the Mac's copy, a quiet folder settles in ~65 seconds, and three receipts processed in 22 seconds.
+
 ## Files you will look at
 
 | Path | Purpose |
 |---|---|
-| `output/kosibah_import.xlsx` | The output workbook. **Purchases** tab: columns B..L (Date..Year) are the master's columns (the master derives Schedule C from Category, so it isn't pasted here); M..P are Source file, Processed on, Status, Bank ref. `Status = Superseded` (grey, strike-through) marks a row replaced by a re-uploaded receipt or by a later receipt claiming a bank-only row -- kept for history, excluded from duplicate checks and from `review`'s Review-rows listing. **Bank** tab: every parsed bank transaction, one row per statement line, with its own reconciliation state (`Matched` / `No receipt` / `Ignored`) -- the source of truth for bank transactions across runs, so a late-arriving receipt can still claim an old unmatched debit. Duplicate (same date/company/total) and re-uploaded rows follow the same `Status = Review` / `Superseded` rules. Copy Purchases rows into the master each quarter. Written atomically, safe to rsync any time. |
+| `output/kosibah_import.xlsx` | The output workbook. **Purchases** tab: columns B..L (Date..Year) are the master's columns (the master derives Schedule C from Category, so it isn't pasted here); M..P are Source file, Processed on, Status, Bank ref; Q is **Copied to master**, human-owned -- Danny types anything into it (e.g. `Y` or a date) after pasting a row into the master, and the pipeline round-trips whatever is there unchanged on every later update, including when a row becomes Superseded; new rows arrive with it blank. `Status = Superseded` (grey, strike-through) marks a row replaced by a re-uploaded receipt or by a later receipt claiming a bank-only row -- kept for history, excluded from duplicate checks and from `review`'s Review-rows listing. **Bank** tab: every parsed bank transaction, one row per statement line, with its own reconciliation state (`Matched` / `No receipt` / `Ignored`) -- the source of truth for bank transactions across runs, so a late-arriving receipt can still claim an old unmatched debit. Duplicate (same date/company/total) and re-uploaded rows follow the same `Status = Review` / `Superseded` rules. Copy Purchases rows into the master each quarter (see "Quarterly copy to the master" below). Written atomically, safe to rsync any time. Every run that changes the workbook commits it (and `data/suppliers.csv` / `data/supplier_aliases.csv`) and pushes to GitHub, so a `git pull` on a laptop gets the latest. The server is the only writer of these files, so on a laptop read or copy from the workbook but do not commit changes to it -- otherwise the server's next push is rejected and needs a manual merge. Turn this off with `[processing] commit_outputs` / `push_outputs` in `config.toml`. |
 | `data/new_suppliers_pending.csv` | Suppliers seen for the first time, with a suggested category. Approve with `review --approve`. |
 | `data/suppliers.csv` | Known suppliers and default categories (seeded from the master). |
 | `data/supplier_aliases.csv` | Spelling/descriptor variants -> canonical supplier. Add rows by hand to merge duplicates. |
 | `data/categories.csv` | Allowed categories -> Schedule C. The pipeline never invents categories. |
 | `data/processing_log.csv` | Ledger of every file processed (hash, date, status, rows added). |
 | `logs/last_run.json` | Machine-readable summary of the most recent run. |
+
+### Quarterly copy to the master
+
+Open `output/kosibah_import.xlsx`, filter the Purchases tab to `Status != Superseded` and
+`Copied to master` blank, paste those rows into the master, then mark each one in `Copied to
+master` (anything non-blank works, e.g. `Y` or the date you copied it). The pipeline never
+touches this column itself, so it's safe to leave it filled in across runs -- a row keeps its
+mark even if it's later superseded by a corrected receipt.
 
 ## Commands
 

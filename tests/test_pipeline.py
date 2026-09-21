@@ -687,3 +687,66 @@ class TestReuploadedExpenses:
         assert new_row.company == "Vendor A Incorporated"
         assert new_row.source_file == "expenses/2026-09-01 - Vendor A__a1b2c3d4.png"
 
+    def test_hand_typed_copied_to_master_survives_supersede_by_reupload(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Danny marks a row "Copied to master" by hand; a later re-upload of the same receipt
+        supersedes the row (R5), but must not blank the value he typed."""
+        expense_path = cfg.paths.imports / "expenses" / "2026-09-01 - Vendor A.png"
+        make_png(expense_path, size=(40, 30))
+        expenses = {
+            expense_path.stem: canned_expense(
+                date="2026-09-01",
+                supplier_name="Vendor A Inc",
+                total=50.0,
+                net=50.0,
+                sales_tax=0,
+                tax_rate=0,
+            )
+        }
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses))
+
+        summary1 = run_pipeline(cfg)
+        assert summary1.errors == []
+
+        wb1 = OutputWorkbook(cfg.paths.output_workbook)
+        rows1 = wb1.rows()
+        assert len(rows1) == 1
+        original_row = rows1[0]
+        original_sheet_row = original_row.sheet_row
+
+        # Danny has already pasted this row into his master spreadsheet and marks it by hand.
+        original_row.copied_to_master = "Y"
+        wb1.update([original_row])
+        wb1.save()
+
+        # Re-upload the same filename with corrected (different) content.
+        make_png(expense_path, size=(41, 31))
+        expenses2 = {
+            expense_path.stem: canned_expense(
+                date="2026-09-01",
+                supplier_name="Vendor A Incorporated",
+                total=50.0,
+                net=50.0,
+                sales_tax=0,
+                tax_rate=0,
+            )
+        }
+        monkeypatch.setattr(pipeline_mod, "ClaudeClient", make_fake_claude_client(expenses=expenses2))
+
+        summary2 = run_pipeline(cfg)
+        assert summary2.errors == []
+        assert summary2.rows_superseded == 1
+
+        wb2 = OutputWorkbook(cfg.paths.output_workbook)
+        rows2 = wb2.rows()
+        assert len(rows2) == 2
+
+        superseded = next(r for r in rows2 if r.sheet_row == original_sheet_row)
+        assert superseded.status == "Superseded"
+        assert superseded.copied_to_master == "Y"
+
+        new_row = next(r for r in rows2 if r.sheet_row != original_sheet_row)
+        assert new_row.company == "Vendor A Incorporated"
+        assert new_row.copied_to_master == ""
+

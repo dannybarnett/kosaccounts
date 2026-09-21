@@ -168,6 +168,69 @@ class TestRun:
         captured = capsys.readouterr()
         assert "Unrecognised imports folder" in captured.err
 
+    def test_calls_commit_outputs_when_summary_did_work(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import kosaccounts.cli as cli_module
+        from kosaccounts.models import RunSummary
+
+        summary = RunSummary(started=datetime(2026, 9, 21, 20, 41), files_new={"expense": 1})
+        monkeypatch.setattr(cli_module, "run_pipeline", lambda cfg_, dry_run, stages: summary)
+
+        calls: list[dict] = []
+
+        def fake_commit_outputs(root, message, push):
+            calls.append({"root": root, "message": message, "push": push})
+            return "committed"
+
+        monkeypatch.setattr(cli_module.gitsync, "commit_outputs", fake_commit_outputs)
+
+        result = main(["--config", _config_path(cfg), "run"])
+        assert result == 0
+
+        assert len(calls) == 1
+        assert calls[0]["root"] == cfg.paths.root
+        assert calls[0]["push"] == cfg.processing.push_outputs
+        captured = capsys.readouterr()
+        assert "git: committed" in captured.out
+
+    def test_skips_commit_outputs_on_dry_run(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import kosaccounts.cli as cli_module
+        from kosaccounts.models import RunSummary
+
+        summary = RunSummary(started=datetime(2026, 9, 21, 20, 41), files_new={"expense": 1})
+        monkeypatch.setattr(cli_module, "run_pipeline", lambda cfg_, dry_run, stages: summary)
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            cli_module.gitsync, "commit_outputs", lambda root, message, push: calls.append(1) or "committed"
+        )
+
+        result = main(["--config", _config_path(cfg), "run", "--dry-run"])
+        assert result == 0
+        assert calls == []
+        captured = capsys.readouterr()
+        assert "git:" not in captured.out
+
+    def test_skips_commit_outputs_when_nothing_to_do(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """No new files -> summary.nothing_to_do is True even on a non-dry-run."""
+        import kosaccounts.cli as cli_module
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            cli_module.gitsync, "commit_outputs", lambda root, message, push: calls.append(1) or "committed"
+        )
+
+        result = main(["--config", _config_path(cfg), "run"])
+        assert result == 0
+        assert calls == []
+        captured = capsys.readouterr()
+        assert "git:" not in captured.out
+
 
 # ---------------------------------------------------------------------------
 # review

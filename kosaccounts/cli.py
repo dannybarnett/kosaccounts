@@ -33,6 +33,7 @@ from typing import Callable, Optional, Sequence
 from kosaccounts.categories import Categories
 from kosaccounts.config import Config, load_config
 from kosaccounts.discovery import STAGE_FOLDERS, discover, new_files
+from kosaccounts import gitsync
 from kosaccounts.intake import puller
 from kosaccounts.intake.auth_setup import run_auth_setup
 from kosaccounts.intake.dropbox_client import AuthFailure, MissingSecret, client_from_env
@@ -215,6 +216,16 @@ def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
 
     summary = run_pipeline(cfg, dry_run=args.dry_run, stages=stages)
     print(format_summary(summary))
+
+    if not args.dry_run and cfg.processing.commit_outputs and not summary.nothing_to_do:
+        try:
+            result = gitsync.commit_outputs(
+                cfg.paths.root, gitsync.run_message(summary), push=cfg.processing.push_outputs
+            )
+            print(f"git: {result}")
+        except Exception:
+            logger.exception("git: unexpected error committing/pushing outputs")
+
     return 1 if summary.errors else 0
 
 

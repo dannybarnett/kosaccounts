@@ -126,7 +126,7 @@ class TestOutputWorkbook:
         assert ws.cell(row=7, column=7).value == "=SUBTOTAL(109,G4:G6)"
 
         table = ws.tables[PurchaseRow.TABLE_NAME]
-        assert table.ref == "B3:P6"
+        assert table.ref == "B3:Q6"
 
         # Check formula text present in J4 (Net=E, Sales Tax=F, Total=G, Check=J)
         assert ws.cell(row=4, column=10).value == '=IF(ROUND(E4+F4,2)=ROUND(G4,2),"ok","!!!!")'
@@ -229,6 +229,128 @@ class TestOutputWorkbook:
 
         header_font = ws.cell(row=3, column=2).font
         assert header_font.bold is True
+
+
+class TestCopiedToMaster:
+    """Column Q ("Copied to master") is human-owned: Danny fills it in by hand after pasting a
+    row into his master accounts spreadsheet. The pipeline must never overwrite it."""
+
+    def test_new_workbook_has_header_and_appended_rows_are_blank(self, tmp_path: Path) -> None:
+        path = tmp_path / "kosibah_import.xlsx"
+        wb = OutputWorkbook(path)
+
+        # Header is written eagerly on creation, before save().
+        assert wb.ws.cell(row=3, column=17).value == "Copied to master"
+
+        row = make_row()
+        wb.append([row])
+        assert row.copied_to_master == ""
+        wb.save()
+
+        wb2 = OutputWorkbook(path)
+        rows = wb2.rows()
+        assert len(rows) == 1
+        assert rows[0].copied_to_master == ""
+
+        raw = openpyxl.load_workbook(path, data_only=False)
+        ws = raw[PurchaseRow.SHEET_NAME]
+        assert ws.cell(row=3, column=17).value == "Copied to master"
+        # openpyxl round-trips an empty-string cell value as None; rows() above already
+        # confirmed the field reads back as "".
+        assert ws.cell(row=4, column=17).value in (None, "")
+
+    def test_hand_typed_value_survives_update_and_save(self, tmp_path: Path) -> None:
+        path = tmp_path / "kosibah_import.xlsx"
+        wb = OutputWorkbook(path)
+        row1 = make_row(day=1)
+        row2 = make_row(day=2)
+        wb.append([row1, row2])
+        wb.save()
+
+        # Danny hand-types a value directly into the cell (simulating him editing the file).
+        raw = openpyxl.load_workbook(path, data_only=False)
+        ws = raw[PurchaseRow.SHEET_NAME]
+        ws.cell(row=4, column=17, value="Y")
+        raw.save(path)
+
+        wb2 = OutputWorkbook(path)
+        rows = wb2.rows()
+        assert rows[0].copied_to_master == "Y"
+        assert rows[1].copied_to_master == ""
+
+        # A status change round-trips through update() unchanged, since it's the same
+        # PurchaseRow object read back by rows().
+        target = rows[0]
+        target.status = "Review"
+        target.notes = "No bank transaction found"
+        wb2.update([target])
+        wb2.save()
+
+        wb3 = OutputWorkbook(path)
+        rows3 = wb3.rows()
+        assert rows3[0].copied_to_master == "Y"
+        assert rows3[0].status == "Review"
+        assert rows3[1].copied_to_master == ""
+
+    def test_pre_existing_workbook_without_column_upgrades_on_load_and_save(
+        self, tmp_path: Path
+    ) -> None:
+        """Simulate a workbook written before "Copied to master" existed: 15 headers, one data
+        row, no column Q at all."""
+        path = tmp_path / "kosibah_import.xlsx"
+        old_columns = [
+            "Date",
+            "Company",
+            "Category",
+            "Net",
+            "Sales Tax",
+            "Total",
+            "Tax rate",
+            "Payment method",
+            "Check",
+            "Notes",
+            "Year",
+            "Source file",
+            "Processed on",
+            "Status",
+            "Bank ref",
+        ]
+        raw = openpyxl.Workbook()
+        default_sheet = raw.active
+        ws = raw.create_sheet(PurchaseRow.SHEET_NAME)
+        raw.remove(default_sheet)
+        ws.cell(row=1, column=2, value="Kosibah LLC purchases - imported")
+        for i, header in enumerate(old_columns):
+            ws.cell(row=3, column=2 + i, value=header)
+        ws.cell(row=4, column=2, value=date(2026, 9, 1))
+        ws.cell(row=4, column=3, value="Mood Fabrics")
+        ws.cell(row=4, column=4, value="Fabric")
+        ws.cell(row=4, column=5, value=100.0)
+        ws.cell(row=4, column=6, value=8.88)
+        ws.cell(row=4, column=7, value=108.88)
+        ws.cell(row=4, column=8, value=8.875)
+        ws.cell(row=4, column=9, value="VISA ****1234")
+        ws.cell(row=4, column=11, value="")
+        ws.cell(row=4, column=12, value=2026)
+        ws.cell(row=4, column=13, value="expenses/2026-09-01 - Mood.pdf")
+        ws.cell(row=4, column=14, value=datetime(2026, 9, 1, 10, 30, 0))
+        ws.cell(row=4, column=15, value="OK")
+        ws.cell(row=4, column=16, value="")
+        raw.save(path)
+
+        wb = OutputWorkbook(path)
+        rows = wb.rows()
+        assert len(rows) == 1
+        assert rows[0].copied_to_master == ""
+        assert rows[0].company == "Mood Fabrics"
+
+        wb.save()
+
+        raw2 = openpyxl.load_workbook(path, data_only=False)
+        ws2 = raw2[PurchaseRow.SHEET_NAME]
+        assert ws2.cell(row=3, column=17).value == "Copied to master"
+        table = ws2.tables[PurchaseRow.TABLE_NAME]
+        assert table.ref == "B3:Q4"
 
 
 def test_save_creates_missing_output_directory(tmp_path):

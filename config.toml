@@ -12,6 +12,11 @@ master_workbook = "specs/Kosibah LLC purchases and receipts.xlsx"
 # true: a run with any flagged item stops before writing the workbook.
 block_on_flags = false
 stages = ["expense", "bank"]
+# After a run that changed anything: commit output/kosibah_import.xlsx plus the tracked data CSVs
+# the pipeline maintains (data/suppliers.csv, data/supplier_aliases.csv), then push to origin, so
+# the workbook reaches other laptops via `git pull`. Failures are logged, never fatal.
+commit_outputs = true
+push_outputs = true
 
 [expenses]
 min_confidence = 0.75      # below this the row is marked Review
